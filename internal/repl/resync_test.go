@@ -376,6 +376,13 @@ func TestAResyncReportsWhatRetentionAlreadyPruned(t *testing.T) {
 	backup := r.backUp()
 	seed(t, r.cs, "metrics", "colca/v1/_Metric/m1/m1/late%d", 8)
 	waitFor(t, "the records sent since the backup at the parent", 10*time.Second, func() bool { return r.parentHolds() == 10 })
+	// The parent holding them is not the child knowing it: the child records
+	// the parent's confirmation when the reply arrives, and loops stopped
+	// before that leave the mark at 2, so the restored parent looks current
+	// and no re-sync starts.
+	waitFor(t, "the child to record the parent's confirmation", 10*time.Second, func() bool {
+		return r.cs.AckedMark(r.cl.ParentPub(), "metrics") == 10
+	})
 
 	// The child is stopped while the parent is restored, and its retention
 	// prunes offsets 1..6: four of them are records the restored parent lacks.
@@ -708,4 +715,35 @@ func asReplError(err error, target **replError) bool {
 		*target = re
 	}
 	return ok
+}
+
+// /healthz reads the re-sync status. syncMu is held across synced writes of
+// the parent state and the uplink cursors, so the status must not wait for
+// it: a stalled disk would otherwise stall the liveness probe too.
+func TestResyncStatusDoesNotWaitForTheSyncLock(t *testing.T) {
+	r := newRestoreRig(t)
+	state := parentState{Store: r.ps.StoreID(), Resync: &Resync{
+		State: resyncReplaying, Reason: "test", ParentStore: r.ps.StoreID(), Started: time.Now().UTC(),
+		Streams: map[string]ResyncRange{"metrics": {From: 1, To: 6}},
+	}}
+	raw, _ := json.Marshal(state)
+	if err := r.cs.SetParentState(r.cl.ParentPub(), raw); err != nil {
+		t.Fatal(err)
+	}
+	if err := PrepareUplink(r.cl, r.cs); err != nil {
+		t.Fatal(err)
+	}
+
+	r.cl.syncMu.Lock() // a writer in the middle of a synced write
+	defer r.cl.syncMu.Unlock()
+	got := make(chan *Resync, 1)
+	go func() { got <- r.cl.ResyncStatus(r.cs) }()
+	select {
+	case status := <-got:
+		if status == nil || status.State != resyncReplaying || status.Streams["metrics"].Position != 1 {
+			t.Fatalf("status = %+v, want the replaying re-sync at position 1", status)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("ResyncStatus waited for syncMu")
+	}
 }

@@ -1,0 +1,33 @@
+name: EnergyConsumer
+version: '1.0'
+description: |-
+  Any element that draws electrical power: a machine, a line, or a meter
+  such as the site's grid connection. Energy is the monotonic meter count;
+  power is the mean over each sample period, so a 15-minute demand value is
+  the mean of active_power over that window. The nameplate rated_power is a
+  constant, not a measurement.
+signals:
+  - name: active_power
+    data_type: number
+    semantic_type: active-power
+    unit: kW
+    description: Mean active power over the sample period.
+  - name: energy_total
+    data_type: number
+    semantic_type: energy-consumption
+    unit: kWh
+    description: Monotonic energy meter count. Consumers compute consumption from the delta
+      over a window; a decrease is a meter reset, not negative consumption.
+  - name: peak_power
+    data_type: number
+    semantic_type: active-power
+    unit: kW
+    required: false
+    description: Highest instantaneous active power within the sample period. Shows inrush
+      at motor starts that the period mean in active_power smooths out.
+constants:
+  - name: rated_power
+    data_type: number
+    semantic_type: rated-power
+    unit: kW
+    description: Nameplate rated power.

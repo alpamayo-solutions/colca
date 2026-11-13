@@ -209,7 +209,8 @@ func run() int {
 	return 0
 }
 
-// ensureSchema retries until the database answers or the window closes.
+// ensureSchema retries until the database answers or the window closes. A
+// schema its owner has not migrated is not retried: waiting does not fix it.
 func ensureSchema(ctx context.Context, sink *historian.Sink, retentionDays int, log *slog.Logger,
 	within time.Duration) error {
 	deadline := time.Now().Add(within)
@@ -218,7 +219,8 @@ func ensureSchema(ctx context.Context, sink *historian.Sink, retentionDays int, 
 		if err == nil {
 			return nil
 		}
-		if time.Now().After(deadline) || ctx.Err() != nil {
+		if time.Now().After(deadline) || ctx.Err() != nil ||
+			errors.Is(err, historian.ErrLateWriteRelationsMissing) {
 			return err
 		}
 		log.Warn("database not ready yet, retrying", "attempt", attempt, "err", err)

@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/alpamayo-solutions/colca/internal/blobstore"
+	"github.com/alpamayo-solutions/colca/internal/clock"
 	"github.com/alpamayo-solutions/colca/internal/config"
 	"github.com/alpamayo-solutions/colca/internal/engine"
 	"github.com/alpamayo-solutions/colca/internal/identity"
@@ -95,6 +96,8 @@ type Client struct {
 	// Whether each replication lane is currently failing, so an outage logs
 	// as a state change rather than once per retry (see linkstate.go).
 	links *linkState
+	// unenrolled spaces every request while the parent answers 401.
+	unenrolled unenrolledBackoff
 	// status is the current uplink condition, read by /healthz. It is an
 	// atomic.Value so a /healthz read never contends with the loops that write it.
 	status        atomic.Value
@@ -107,8 +110,12 @@ type Client struct {
 	// syncMu guards what this node keeps about the parent's store (resync.go):
 	// state, the epoch of the uplink positions, and the cancel of the poll in
 	// flight. It is never held across a request.
-	syncMu      sync.Mutex
-	state       parentState
+	syncMu sync.Mutex
+	state  parentState
+	// resyncView is state.Resync as last set under syncMu, for ResyncStatus to
+	// read without it: syncMu is held across synced writes, and /healthz must
+	// not wait on the disk. A published Resync is never changed in place.
+	resyncView  atomic.Pointer[Resync]
 	stateLoaded bool
 	epoch       uint64
 	pollCancel  context.CancelFunc
@@ -121,6 +128,16 @@ type Client struct {
 	// logs decides which logs-stream records rise (parent.logs). The default
 	// forwards WARNING and above.
 	logs logForwarding
+	// setAsideGrace overrides defaultSetAsideGrace in tests; see setaside.go.
+	setAsideGrace time.Duration
+	// findingMu serializes publishSetAsideFinding: the uplink and DELETE
+	// /uplink/set-aside both read the copies and write the finding from them,
+	// and without it the older read could be written last.
+	findingMu sync.Mutex
+	// findingRead and findingWait are test hooks, nil in production: called
+	// between reading the copies and writing the finding, and when a publish
+	// has to wait for another.
+	findingRead, findingWait func()
 }
 
 // SetStoreID names the store incarnation replication batches carry, for a
@@ -280,25 +297,39 @@ type envelope struct {
 	acked     uint64
 }
 
+// parentClock is what a replication response says about the parent's clock:
+// its wall clock when it wrote the response, and how long it had the request by
+// then. Held is 0 from a parent that predates the field.
+type parentClock struct {
+	NowMS  int64
+	HeldMS int64
+}
+
+// sample is the reading as the clock package takes it, with this node's clock
+// before the request and after the response.
+func (p parentClock) sample(sent, received time.Time) clock.ParentSample {
+	return clock.ParentSample{NowMS: p.NowMS, Held: time.Duration(p.HeldMS) * time.Millisecond, Sent: sent, Received: received}
+}
+
 // replicate is the context-aware implementation behind Replicate and RunUplink.
-// nowMS is the parent's clock from the response; RunUplink records the skew to
+// pc is the parent's clock from the response; RunUplink records the skew to
 // it and Replicate drops it.
-func (c *Client) replicate(ctx context.Context, env envelope, recs []store.ReplRecord) (hwm uint64, nowMS int64, err error) {
+func (c *Client) replicate(ctx context.Context, env envelope, recs []store.ReplRecord) (hwm uint64, pc parentClock, err error) {
 	if len(recs) > maxReplicateRecords {
-		return 0, 0, fmt.Errorf("replicate: batch has %d records, maximum is %d", len(recs), maxReplicateRecords)
+		return 0, parentClock{}, fmt.Errorf("replicate: batch has %d records, maximum is %d", len(recs), maxReplicateRecords)
 	}
 	body, err := marshalReplication(env, recs)
 	if err != nil {
-		return 0, 0, err
+		return 0, parentClock{}, err
 	}
 	if int64(len(body)) > c.maxReplicateBody {
-		return 0, 0, fmt.Errorf("replicate: request is %d bytes, maximum is %d", len(body), c.maxReplicateBody)
+		return 0, parentClock{}, fmt.Errorf("replicate: request is %d bytes, maximum is %d", len(body), c.maxReplicateBody)
 	}
 	ctx, cancel := context.WithTimeout(ctx, transferDeadline(int64(len(body))))
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.base+"/replicate", bytes.NewReader(body))
 	if err != nil {
-		return 0, 0, err
+		return 0, parentClock{}, err
 	}
 	req.Header.Set("Content-Type", "application/json")
 	if len(body) >= expectContinueBytes {
@@ -308,21 +339,22 @@ func (c *Client) replicate(ctx context.Context, env envelope, recs []store.ReplR
 	}
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return 0, 0, err
+		return 0, parentClock{}, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return 0, 0, &replError{Route: "replicate to " + c.base, Status: resp.StatusCode, Body: readReason(resp),
+		return 0, parentClock{}, &replError{Route: "replicate to " + c.base, Status: resp.StatusCode, Body: readReason(resp),
 			RetryAfter: retryAfterHeader(resp), Store: resp.Header.Get(storeHeader)}
 	}
 	var out struct {
-		HWM   uint64 `json:"hwm"`
-		NowMS int64  `json:"now_ms"`
+		HWM    uint64 `json:"hwm"`
+		NowMS  int64  `json:"now_ms"`
+		HeldMS int64  `json:"held_ms"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		return 0, 0, err
+		return 0, parentClock{}, err
 	}
-	return out.HWM, out.NowMS, nil
+	return out.HWM, parentClock{NowMS: out.NowMS, HeldMS: out.HeldMS}, nil
 }
 
 func marshalReplication(env envelope, recs []store.ReplRecord) ([]byte, error) {
@@ -331,7 +363,7 @@ func marshalReplication(env envelope, recs []store.ReplRecord) ([]byte, error) {
 		wire[i] = wireRec{
 			SkipFrom: r.SkipFrom,
 			O:        r.ChildOffset, OO: r.OriginOffset, T: r.Topic, P: r.Payload, TS: r.TS,
-			WB: r.WrittenBy, AID: r.ActorID, AL: r.ActorLabel, AK: r.ActorKind, AG: r.ActorGroups, AC: r.ActorClient,
+			WB: r.WrittenBy, AID: r.ActorID, AL: r.ActorLabel, AK: r.ActorKind, AG: r.ActorGroups, AC: r.ActorClient, AE: r.ActorEmail, ACS: r.ActorClasses, ACR: r.ActorCredential,
 		}
 	}
 	msg := map[string]any{"stream": env.stream, "records": wire}
@@ -389,6 +421,10 @@ type DownRec struct {
 	ActorKind    string
 	ActorGroups  []string
 	ActorClient  string
+	ActorEmail   string
+	ActorClasses []string
+	// ActorCredential is store.Record.ActorCredential.
+	ActorCredential string
 }
 
 // downResult is one decoded downlink response. Definitions share the response
@@ -397,10 +433,14 @@ type downResult struct {
 	Records     []DownRec
 	Next        uint64
 	Gap         *store.GapSpan
-	NowMS       int64
+	Clock       parentClock
 	Ancestry    *uns.Ancestry
 	Definitions []DownRec
 	DefNext     uint64
+	// Confirms is true from a parent that answers a confirm request at once
+	// (see confirmPage). One that predates it would hold the request as a long
+	// poll, so it is never asked.
+	Confirms bool
 	// Head is the parent's commands stream head at hello time, where a child with no
 	// cursor for this parent must start. Only the hello response carries it; 0 means
 	// the parent sent none.
@@ -505,7 +545,7 @@ func (c *Client) greet(st *store.Store) greeting {
 }
 
 // downlink is the context-aware implementation behind the wrappers and
-// RunDownlink. NowMS is the parent's clock, which RunDownlink measures this
+// RunDownlink. Clock is the parent's clock, which RunDownlink measures this
 // node's skew against. Ancestry is the position the parent teaches, or nil.
 func (c *Client) downlink(ctx context.Context, after, defAfter uint64, limit int, timeout time.Duration) (downResult, error) {
 	return c.downlinkURL(ctx, fmt.Sprintf("%s/downlink?after=%d&def_after=%d&max=%d",
@@ -515,9 +555,17 @@ func (c *Client) downlink(ctx context.Context, after, defAfter uint64, limit int
 // poll is downlink for the replication loop: it states the parent incarnation
 // this node recorded, so a parent whose store changed refuses instead of
 // answering a position of another history.
-func (c *Client) poll(ctx context.Context, after, defAfter uint64) (downResult, error) {
-	return c.downlinkURL(ctx, fmt.Sprintf("%s/downlink?after=%d&def_after=%d&max=%d&parent=%s&store=%s",
-		c.base, after, defAfter, replBatch, url.QueryEscape(c.parentStore()), url.QueryEscape(c.storeID())), downlinkWait)
+//
+// confirm asks the parent to answer at once with what it holds, instead of
+// holding the request until there is something: the request then has a round
+// trip's time and no more.
+func (c *Client) poll(ctx context.Context, after, defAfter uint64, confirm bool) (downResult, error) {
+	u := fmt.Sprintf("%s/downlink?after=%d&def_after=%d&max=%d&parent=%s&store=%s",
+		c.base, after, defAfter, replBatch, url.QueryEscape(c.parentStore()), url.QueryEscape(c.storeID()))
+	if confirm {
+		return c.downlinkURL(ctx, u+"&confirm=1", 0)
+	}
+	return c.downlinkURL(ctx, u, downlinkWait)
 }
 
 func (c *Client) downlinkURL(ctx context.Context, url string, timeout time.Duration) (downResult, error) {
@@ -543,6 +591,8 @@ func (c *Client) downlinkURL(ctx context.Context, url string, timeout time.Durat
 		Next        uint64            `json:"next"`
 		Gap         *store.GapSpan    `json:"gap"`
 		NowMS       int64             `json:"now_ms"`
+		HeldMS      int64             `json:"held_ms"`
+		Confirms    bool              `json:"confirms"`
 		Ancestry    *uns.Ancestry     `json:"ancestry"`
 		Definitions []wireRec         `json:"definitions"`
 		DefNext     uint64            `json:"def_next"`
@@ -560,7 +610,8 @@ func (c *Client) downlinkURL(ctx context.Context, url string, timeout time.Durat
 		Records:     toDownRecs(out.Records),
 		Next:        out.Next,
 		Gap:         out.Gap,
-		NowMS:       out.NowMS,
+		Clock:       parentClock{NowMS: out.NowMS, HeldMS: out.HeldMS},
+		Confirms:    out.Confirms,
 		Ancestry:    out.Ancestry,
 		Definitions: toDownRecs(out.Definitions),
 		DefNext:     out.DefNext,
@@ -579,7 +630,7 @@ func toDownRecs(in []wireRec) []DownRec {
 		out[i] = DownRec{
 			ParentOffset: r.O, Topic: r.T, Payload: r.P, TS: r.TS,
 			WrittenBy: r.WB, ActorID: r.AID,
-			ActorLabel: r.AL, ActorKind: r.AK, ActorGroups: r.AG, ActorClient: r.AC,
+			ActorLabel: r.AL, ActorKind: r.AK, ActorGroups: r.AG, ActorClient: r.AC, ActorEmail: r.AE, ActorClasses: r.ACS, ActorCredential: r.ACR,
 		}
 	}
 	return out
@@ -609,6 +660,52 @@ func pushable(laneFilter func(string) bool) func(string) bool {
 		return leavesTheNode
 	}
 	return func(topic string) bool { return leavesTheNode(topic) && laneFilter(topic) }
+}
+
+// withheldLog is a logs-stream record the log policy keeps home. Like every
+// filtered record, the uplink cursor moves past it, so it neither holds the lane
+// nor pins retention. It is counted only once the cursor has moved, so a retried
+// page counts once.
+type withheldLog struct {
+	offset uint64
+	level  string
+}
+
+// readUplinkPage reads the physical page of stream that starts at from: at most
+// replBatch records, the ones that stay home included, so a lane that keeps
+// most of its records home still moves forward a page at a time. Each record is
+// judged on its head (see store.EachRecord): only the records allowed keeps and
+// the log policy forwards are decoded and returned, and the logs the policy keeps
+// home come back in withheld. next is the offset after the last record of the
+// page; it equals from when the lane is empty.
+func (c *Client) readUplinkPage(st *store.Store, stream string, from uint64, allowed func(string) bool) (recs []store.StoredRecord, withheld []withheldLog, next uint64, err error) {
+	next = from
+	scanned := 0
+	head := func(off uint64, topic string, _ int64) (decode, more bool) {
+		if scanned >= replBatch {
+			return false, false
+		}
+		scanned++
+		next = off + 1
+		if !allowed(topic) {
+			return false, true
+		}
+		if stream == logsStream {
+			if ok, level := c.logs.forward(topic); !ok {
+				withheld = append(withheld, withheldLog{off, level})
+				return false, true
+			}
+		}
+		return true, true
+	}
+	err = st.EachRecord(stream, from, st.NextOffset(stream), head, func(r store.StoredRecord) bool {
+		recs = append(recs, r)
+		return true
+	})
+	if err != nil {
+		return nil, nil, from, err
+	}
+	return recs, withheld, next, nil
 }
 
 // priorityLanes are drained to empty, in this order, before metrics. Acks come
@@ -802,6 +899,11 @@ func RunUplink(c *Client, eng *engine.Engine, blobs *blobstore.Store, m *metrics
 	// busyUntil is, per lane, until when a parent that answered 429 asked to be
 	// left alone. A lane waits it out even while other lanes make progress.
 	busyUntil := map[string]time.Time{}
+	// holds isolates, per lane, a record the parent refuses (see setaside.go).
+	holds := map[string]*laneHold{}
+	if err := c.publishSetAsideFinding(eng); err != nil {
+		c.log.Warn("uplink_set_aside finding not brought up to date at start", "err", err)
+	}
 	pushOnce := func(stream string, filter func(string) bool) (scanned, aborted bool) {
 		if c.resyncWanted.Load() {
 			// The parent's store is not the one this node's positions belong
@@ -816,6 +918,12 @@ func RunUplink(c *Client, eng *engine.Engine, blobs *blobstore.Store, m *metrics
 				return false, false
 			}
 			delete(busyUntil, stream)
+		}
+		if c.unenrolled.wait(time.Now()) > 0 {
+			// The parent does not know this node's key: no lane asks again
+			// before the wait is over.
+			retryPending = true
+			return false, false
 		}
 		// The epoch and the parent incarnation are read together and before the
 		// cursor: a page read at a position a re-sync has since moved names the
@@ -835,8 +943,11 @@ func RunUplink(c *Client, eng *engine.Engine, blobs *blobstore.Store, m *metrics
 			eng.Store().CursorAck(uns.UplinkCursor(c.parentPub), stream, lwm)
 			from = lwm
 		}
-		// Read a bounded physical page before filtering, including local-only records.
-		recs, next, err := eng.Store().Read(stream, from, replBatch, nil)
+		// Read a bounded physical page, including local-only records. The lane's
+		// filter and the log policy decide on a record's head: what stays home is
+		// stepped over without being decoded.
+		allowed := pushable(filter)
+		recs, withheld, next, err := c.readUplinkPage(eng.Store(), stream, from, allowed)
 		if err != nil {
 			c.log.Error("uplink read", "stream", stream, "err", err)
 			retryPending = true
@@ -848,25 +959,7 @@ func RunUplink(c *Client, eng *engine.Engine, blobs *blobstore.Store, m *metrics
 		pushed := false
 		var hwm uint64
 		batch := make([]store.ReplRecord, 0, len(recs))
-		allowed := pushable(filter)
-		// Records the log policy keeps home. Like every filtered record, the cursor
-		// moves past them, so they neither hold the lane nor pin retention. They are
-		// counted only once the cursor has moved, so a retried page counts once.
-		type withheldLog struct {
-			offset uint64
-			level  string
-		}
-		var withheld []withheldLog
 		for _, r := range recs {
-			if !allowed(r.Topic) {
-				continue
-			}
-			if stream == logsStream {
-				if ok, level := c.logs.forward(r.Topic); !ok {
-					withheld = append(withheld, withheldLog{r.Offset, level})
-					continue
-				}
-			}
 			if stream == "metrics" && r.SourceLocalOnly {
 				if n := len(batch); n > 0 && batch[n-1].SkipFrom != 0 && batch[n-1].ChildOffset+1 == r.Offset {
 					batch[n-1].ChildOffset = r.Offset
@@ -879,7 +972,7 @@ func RunUplink(c *Client, eng *engine.Engine, blobs *blobstore.Store, m *metrics
 				ChildOffset: r.Offset, OriginOffset: r.OriginOffset,
 				Topic: r.Topic, Payload: r.Payload, TS: r.TS,
 				WrittenBy: r.WrittenBy, ActorID: r.ActorID,
-				ActorLabel: r.ActorLabel, ActorKind: r.ActorKind, ActorGroups: r.ActorGroups, ActorClient: r.ActorClient,
+				ActorLabel: r.ActorLabel, ActorKind: r.ActorKind, ActorGroups: r.ActorGroups, ActorClient: r.ActorClient, ActorEmail: r.ActorEmail, ActorClasses: r.ActorClasses, ActorCredential: r.ActorCredential,
 			})
 		}
 		if len(batch) > 0 {
@@ -893,11 +986,22 @@ func RunUplink(c *Client, eng *engine.Engine, blobs *blobstore.Store, m *metrics
 				m.UplinkPushFailed(stream)
 				return false, false
 			}
+			hold := holds[stream]
+			if hold == nil {
+				hold = &laneHold{}
+				holds[stream] = hold
+			}
+			if hold.limit > 0 && len(batch) > hold.limit {
+				// Isolating a refused record: the records before it go first.
+				batch = batch[:hold.limit]
+			}
 			if len(batch) < fullBatchLen {
 				next = batch[len(batch)-1].ChildOffset + 1
 			}
-			var nowMS int64
-			hwm, nowMS, err = c.replicate(ctx, env, batch)
+			var pc parentClock
+			sent := eng.Now()
+			hwm, pc, err = c.replicate(ctx, env, batch)
+			received := eng.Now()
 			if err == nil && hwm < batch[len(batch)-1].ChildOffset {
 				err = fmt.Errorf("parent acknowledged offset %d below batch end %d", hwm, batch[len(batch)-1].ChildOffset)
 			}
@@ -908,10 +1012,12 @@ func RunUplink(c *Client, eng *engine.Engine, blobs *blobstore.Store, m *metrics
 				// A parent that answered and refused (4xx) is not a parent that is down, and the
 				// log must say which.
 				//
-				// A refused batch is held and retried, never skipped. Only retention decides to
-				// drop data, and it leaves a _StreamGap marker; skipping here would lose records
-				// without a trace over what is usually a config mismatch (max_record_bytes).
-				// colca_uplink_refused_total and this error make the stalled lane visible.
+				// A refused batch is held and retried, not skipped: a refusal is usually a config
+				// mismatch (max_record_bytes) that the parent's operator fixes. The retry sends
+				// half the batch, down to the one record the parent refuses, so the records
+				// before it rise; that record alone is set aside only after the grace, with a
+				// copy, a finding and an error that say it did not reach the parent (setaside.go).
+				// colca_uplink_refused_total and this error make the held lane visible.
 				var refusal *replError
 				if errors.As(err, &refusal) && refusal.StoreChanged() {
 					// Not a refusal of the batch: the parent's store changed.
@@ -925,6 +1031,9 @@ func RunUplink(c *Client, eng *engine.Engine, blobs *blobstore.Store, m *metrics
 				}
 				refused := errors.As(err, &refusal) && refusal.Refused()
 				busy := refusal != nil && refusal.Busy()
+				if refused && refusal.Unauthorized() {
+					c.unenrolled.refused(time.Now())
+				}
 				if busy {
 					// The parent is shedding load: wait as long as it asked, with
 					// jitter so its children do not return in step.
@@ -938,7 +1047,7 @@ func RunUplink(c *Client, eng *engine.Engine, blobs *blobstore.Store, m *metrics
 							"stream", stream, "parent", c.base, "retry_after", refusal.RetryAfter,
 							"attempts", attempts, "busy_for", down.Round(time.Second))
 					case refused:
-						c.log.Error("uplink refused by the parent — the batch is held and retried, nothing is dropped",
+						c.log.Error("uplink refused by the parent — the batch is held and retried; a record refused alone past the grace is set aside",
 							"stream", stream, "parent", c.base, "status", refusal.Status,
 							"meaning", replicationStatusMeaning(refusal.Status),
 							"parent_said", refusal.Body,
@@ -954,10 +1063,23 @@ func RunUplink(c *Client, eng *engine.Engine, blobs *blobstore.Store, m *metrics
 				if refused {
 					m.UplinkRefused(stream)
 				}
+				if refused && !refusal.Unauthorized() && hold.refused(batch, time.Now(), c.grace()) {
+					for _, r := range recs {
+						if r.Offset == batch[0].ChildOffset {
+							if c.setAside(eng, m, epoch, stream, r, refusal, hold.since) {
+								*hold = laneHold{}
+								return true, false
+							}
+							break
+						}
+					}
+				}
 				// The cursor stays put. Report "not scanned" so a batch the parent cannot take
 				// ends the drain loop instead of spinning.
 				return false, false
 			}
+			c.unenrolled.accepted()
+			hold.accepted()
 			if wasFailing, attempts, down := c.links.Recovered("uplink:"+stream, time.Now()); wasFailing {
 				c.log.Info("uplink recovered",
 					"stream", stream, "parent", c.base,
@@ -965,7 +1087,7 @@ func RunUplink(c *Client, eng *engine.Engine, blobs *blobstore.Store, m *metrics
 			}
 			// Every /replicate response carries the parent's clock; keep the skew
 			// measurement fresh whichever stream triggered the push.
-			eng.ObserveParentClock(nowMS)
+			eng.ObserveParentClock(pc.sample(sent, received))
 			if hwm >= eng.Store().NextOffset(stream) &&
 				(env.store != c.storeID() || c.ownStoreBehind(eng.Store(), m, stream, hwm)) {
 				// The parent holds an offset this store has not handed out: it
@@ -1043,7 +1165,7 @@ func RunUplink(c *Client, eng *engine.Engine, blobs *blobstore.Store, m *metrics
 						soonest = left
 					}
 				}
-				delay = max(delay, soonest)
+				delay = max(delay, soonest, c.unenrolled.wait(time.Now()))
 				wake = nil // commits cannot shorten a failed-request backoff
 			}
 			select {
@@ -1093,7 +1215,7 @@ func RunDownlink(c *Client, eng *engine.Engine, m *metrics.Metrics, stop <-chan 
 		select {
 		case <-stop:
 			return false
-		case <-time.After(retryAfter):
+		case <-time.After(max(retryAfter, c.unenrolled.wait(time.Now()))):
 			return true
 		}
 	}
@@ -1105,6 +1227,11 @@ func RunDownlink(c *Client, eng *engine.Engine, m *metrics.Metrics, stop <-chan 
 	handshake := func(first bool) bool {
 		for {
 			res, err := c.hello(ctx, c.greet(st))
+			if err == nil {
+				c.unenrolled.accepted()
+			} else if isUnauthorized(err) {
+				c.unenrolled.refused(time.Now())
+			}
 			if err == nil && c.settle(eng, m, res, first) {
 				if wasFailing, attempts, waited := c.links.Recovered("hello", time.Now()); wasFailing {
 					c.log.Info("contact with the parent succeeded",
@@ -1146,8 +1273,25 @@ func RunDownlink(c *Client, eng *engine.Engine, m *metrics.Metrics, stop <-chan 
 		}
 		after := st.CursorGet(uns.DownlinkCursor(c.parentPub), downlinkStream)
 		defAfter := st.CursorGet(uns.DownlinkDefCursor(c.parentPub), downlinkDefStream)
-		res, err := c.pollInterruptibly(ctx, after, defAfter)
-		recs, next, gap, nowMS, ancestry := res.Records, res.Next, res.Gap, res.NowMS, res.Ancestry
+		sent := eng.Now()
+		res, err := c.pollInterruptibly(ctx, after, defAfter, false)
+		received := eng.Now()
+		if err == nil {
+			c.setStatus(UplinkConnected)
+			m.DownlinkFetched(time.Now())
+			// The response carries the parent's clock: a skew measurement, nothing more,
+			// and none at all when the exchange took too long on the link to bound one.
+			// Expiry is judged on this node's own clock.
+			eng.ObserveParentClock(res.Clock.sample(sent, received))
+			if len(res.Records) > 0 && res.Confirms {
+				// The parent wrote this page when its first command arrived there, and
+				// the page may have been on the link for a long time since: a link that
+				// stalls keeps a written response back for seconds. Ask once more,
+				// without waiting, for everything that waits now, so what queued up
+				// behind the page is stored with it rather than a moment after it.
+				res, err = c.confirmPage(ctx, eng, res, after, defAfter)
+			}
+		}
 		if err != nil {
 			if stopped() {
 				return // the request was aborted by our own shutdown
@@ -1160,6 +1304,9 @@ func RunDownlink(c *Client, eng *engine.Engine, m *metrics.Metrics, stop <-chan 
 				c.resyncWanted.Store(true)
 				continue
 			}
+			if isUnauthorized(err) {
+				c.unenrolled.refused(time.Now())
+			}
 			c.setStatus(classifyUplinkErr(err))
 			c.log.Warn("downlink fetch failed (will retry)", "err", err)
 			m.DownlinkFetchFailed()
@@ -1169,11 +1316,7 @@ func RunDownlink(c *Client, eng *engine.Engine, m *metrics.Metrics, stop <-chan 
 			rehello = true
 			continue
 		}
-		c.setStatus(UplinkConnected)
-		m.DownlinkFetched(time.Now())
-		// The response carries the parent's clock: a skew measurement, nothing more.
-		// Expiry is judged on this node's own clock.
-		eng.ObserveParentClock(nowMS)
+		recs, next, gap, ancestry := res.Records, res.Next, res.Gap, res.Ancestry
 		if ancestry != nil {
 			eng.SetAncestry(*ancestry) // idempotent: every poll may carry it
 		}
@@ -1186,46 +1329,7 @@ func RunDownlink(c *Client, eng *engine.Engine, m *metrics.Metrics, stop <-chan 
 				"first_ts", gap.FirstTS, "last_ts", gap.LastTS, "approx", gap.Approx)
 			m.GapReceived("commands")
 		}
-		// A record this node refused is skipped; a record it could not store holds the
-		// cursor so the parent offers it again. A refusal (engine.RejectError) will be
-		// made the same way every time, so rereading it would stall the lane. A store
-		// failure (full disk, I/O error, record over max_record_bytes) says nothing about
-		// the record, and acking past it would silently drop the command.
-		ackTo := next
-		rehanded := c.commandsRehandedBelow()
-		for _, r := range recs {
-			// A command this node already holds is the same command at whatever
-			// offset it arrives: the parent's store regressed and reuses offsets,
-			// or the command came down to the parent a second time.
-			if memory.holds(r.Topic, r.Payload, r.TS) && (hasCorrelationID(r.Payload) || r.ParentOffset < rehanded) {
-				c.log.Warn("command already held by this node — not stored or executed again",
-					"topic", r.Topic, "parent_offset", r.ParentOffset)
-				m.DownlinkCommandKnown()
-				continue
-			}
-			// The record and the cursor past it are one write: a crash or a lost
-			// response makes the parent hand it again, and it is then recognized as
-			// stored instead of being stored and executed a second time.
-			stored, err := eng.IngestDownlinkAttributed(r.Topic, r.Payload, r.TS, engine.Attribution{
-				WrittenBy: r.WrittenBy, ActorID: r.ActorID,
-				ActorLabel: r.ActorLabel, ActorKind: r.ActorKind, ActorGroups: r.ActorGroups, ActorClient: r.ActorClient,
-			}, &store.CursorAdvance{Name: uns.DownlinkCursor(c.parentPub), Stream: downlinkStream, To: r.ParentOffset + 1})
-			if err != nil {
-				var refused *engine.RejectError
-				if errors.As(err, &refused) {
-					c.log.Error("downlink command refused by this node — skipping past it",
-						"topic", r.Topic, "reason", refused.Reason, "err", err)
-					continue
-				}
-				c.log.Error("downlink command not stored — holding the cursor so the parent offers it again",
-					"topic", r.Topic, "parent_offset", r.ParentOffset, "err", err)
-				ackTo = r.ParentOffset
-				break
-			}
-			if stored.Persisted {
-				memory.add(r.Topic, r.Payload, r.TS, stored.Offset, st.LWM("commands"))
-			}
-		}
+		ackTo := c.storePage(eng, m, memory, recs, next)
 		progressed := applyDefinitions(c, eng, m, res)
 		if ackTo > after {
 			st.CursorAck(uns.DownlinkCursor(c.parentPub), downlinkStream, ackTo)
@@ -1241,8 +1345,134 @@ func RunDownlink(c *Client, eng *engine.Engine, m *metrics.Metrics, stop <-chan 
 	}
 }
 
-// pollInterruptibly is one poll that requestResync can end.
-func (c *Client) pollInterruptibly(ctx context.Context, after, defAfter uint64) (downResult, error) {
+// confirmPage asks the parent again, without waiting, for what it holds from
+// the position page was read at, and returns that answer in page's place. The
+// position is the same one, so the parent takes no receipt from the request;
+// the commands of page come again, with any issued since. When the request
+// fails the page in hand is returned as it is: a command this node holds is not
+// kept back on a link that is failing, and the next poll reports the failure.
+//
+// The one exception is a parent that refuses this node's key: it has revoked
+// or retired this node while the page was on the link. A drain that retires a
+// child resolved every command it had not seen acknowledged as expired, and a
+// revoke ended the parent's obligation to deliver, so storing the page would
+// deliver what the parent recorded as never delivered ("deliver OR expire",
+// never both). The page is dropped unacknowledged and the refusal is returned
+// for the loop to handle like any other refused poll.
+func (c *Client) confirmPage(ctx context.Context, eng *engine.Engine, page downResult, after, defAfter uint64) (downResult, error) {
+	sent := eng.Now()
+	confirmed, err := c.pollInterruptibly(ctx, after, defAfter, true)
+	received := eng.Now()
+	if isUnauthorized(err) {
+		c.log.Warn("downlink page dropped: the parent no longer enrolls this node, so it has resolved the "+
+			"commands in hand without this node (revoked, or retired by a drain that let them expire)",
+			"parent", c.base, "commands", len(page.Records), "err", err)
+		return downResult{}, err
+	}
+	if err != nil {
+		c.log.Warn("downlink page not confirmed with the parent — storing the commands in hand; "+
+			"any that queued behind them follow with the next poll",
+			"parent", c.base, "commands", len(page.Records), "err", err)
+		return page, nil
+	}
+	eng.ObserveParentClock(confirmed.Clock.sample(sent, received))
+	return confirmed, nil
+}
+
+// storePage stores the commands of one downlink page and returns the position
+// to acknowledge. The page is one write (engine.IngestDownlinkPage): a consumer
+// that is handed its first command finds the others behind it.
+//
+// A command this node refused is skipped; one it could not store holds the
+// cursor so the parent offers it again. A refusal (engine.RejectError) will be
+// made the same way every time, so rereading it would stall the lane. A store
+// failure (full disk, I/O error, record over max_record_bytes) says nothing about
+// the command, and acking past it would silently drop it. A page that cannot be
+// written as one is therefore stored command by command, which finds the one
+// that fails.
+func (c *Client) storePage(eng *engine.Engine, m *metrics.Metrics, memory *commandMemory, recs []DownRec, next uint64) (ackTo uint64) {
+	st := eng.Store()
+	rehanded := c.commandsRehandedBelow()
+	fresh := make([]DownRec, 0, len(recs))
+	for _, r := range recs {
+		// A command this node already holds is the same command at whatever
+		// offset it arrives: the parent's store regressed and reuses offsets,
+		// or the command came down to the parent a second time.
+		if memory.holds(r.Topic, r.Payload, r.TS) && (hasCorrelationID(r.Payload) || r.ParentOffset < rehanded) {
+			c.log.Warn("command already held by this node — not stored or executed again",
+				"topic", r.Topic, "parent_offset", r.ParentOffset)
+			m.DownlinkCommandKnown()
+			continue
+		}
+		fresh = append(fresh, r)
+	}
+	if len(fresh) == 0 {
+		return next
+	}
+	attribution := func(r DownRec) engine.Attribution {
+		return engine.Attribution{
+			WrittenBy: r.WrittenBy, ActorID: r.ActorID,
+			ActorLabel: r.ActorLabel, ActorKind: r.ActorKind, ActorGroups: r.ActorGroups, ActorClient: r.ActorClient, ActorEmail: r.ActorEmail, ActorClasses: r.ActorClasses, ActorCredential: r.ActorCredential,
+		}
+	}
+	cursor := uns.DownlinkCursor(c.parentPub)
+	cmds := make([]engine.DownlinkCommand, len(fresh))
+	for i, r := range fresh {
+		cmds[i] = engine.DownlinkCommand{Topic: r.Topic, Payload: r.Payload, TS: r.TS, Attribution: attribution(r)}
+	}
+	// The commands and the cursor past the page are one write: a crash or a lost
+	// response makes the parent hand the page again, and it is then recognized as
+	// stored instead of being stored and executed a second time.
+	results, err := eng.IngestDownlinkPage(cmds, store.CursorAdvance{Name: cursor, Stream: downlinkStream, To: next})
+	if err == nil {
+		for i, res := range results {
+			r := fresh[i]
+			switch {
+			case res.Err != nil:
+				c.logRefused(r, res.Err)
+			case res.Persisted:
+				memory.add(r.Topic, r.Payload, r.TS, res.Offset, st.LWM("commands"))
+			}
+		}
+		return next
+	}
+	if !errors.Is(err, engine.ErrNotOnePage) {
+		c.log.Warn("downlink page not stored in one write — storing it command by command",
+			"commands", len(fresh), "err", err)
+	}
+	for _, r := range fresh {
+		stored, err := eng.IngestDownlinkAttributed(r.Topic, r.Payload, r.TS, attribution(r),
+			&store.CursorAdvance{Name: cursor, Stream: downlinkStream, To: r.ParentOffset + 1})
+		if err != nil {
+			var refused *engine.RejectError
+			if errors.As(err, &refused) {
+				c.logRefused(r, err)
+				continue
+			}
+			c.log.Error("downlink command not stored — holding the cursor so the parent offers it again",
+				"topic", r.Topic, "parent_offset", r.ParentOffset, "err", err)
+			return r.ParentOffset
+		}
+		if stored.Persisted {
+			memory.add(r.Topic, r.Payload, r.TS, stored.Offset, st.LWM("commands"))
+		}
+	}
+	return next
+}
+
+func (c *Client) logRefused(r DownRec, err error) {
+	reason := ""
+	var refused *engine.RejectError
+	if errors.As(err, &refused) {
+		reason = refused.Reason
+	}
+	c.log.Error("downlink command refused by this node — skipping past it",
+		"topic", r.Topic, "reason", reason, "err", err)
+}
+
+// pollInterruptibly is one poll that requestResync can end. confirm asks the
+// parent to answer at once (see confirmPage).
+func (c *Client) pollInterruptibly(ctx context.Context, after, defAfter uint64, confirm bool) (downResult, error) {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	c.syncMu.Lock()
@@ -1257,7 +1487,7 @@ func (c *Client) pollInterruptibly(ctx context.Context, after, defAfter uint64) 
 		// Asked for between the loop's check and the cancel being in place.
 		return downResult{}, context.Canceled
 	}
-	return c.poll(ctx, after, defAfter)
+	return c.poll(ctx, after, defAfter, confirm)
 }
 
 // settle places this node against the store the parent described in a hello
@@ -1370,7 +1600,7 @@ func applyDefinitions(c *Client, eng *engine.Engine, m *metrics.Metrics, res dow
 		}
 		if _, err := eng.IngestDownlinkDefinitionAttributed(r.Topic, r.Payload, r.TS, engine.Attribution{
 			WrittenBy: r.WrittenBy, ActorID: r.ActorID,
-			ActorLabel: r.ActorLabel, ActorKind: r.ActorKind, ActorGroups: r.ActorGroups, ActorClient: r.ActorClient,
+			ActorLabel: r.ActorLabel, ActorKind: r.ActorKind, ActorGroups: r.ActorGroups, ActorClient: r.ActorClient, ActorEmail: r.ActorEmail, ActorClasses: r.ActorClasses, ActorCredential: r.ActorCredential,
 		}); err != nil {
 			m.DefinitionRejected()
 			var refused *engine.RejectError

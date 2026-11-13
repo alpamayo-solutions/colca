@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/alpamayo-solutions/colca/door"
 	"github.com/alpamayo-solutions/colca/plugins/uns"
 )
 
@@ -42,7 +43,17 @@ type Syncer struct {
 	DryRun   bool
 	Log      *slog.Logger
 	Metrics  *Metrics
+	// Coalesce is the least time between the starts of two cycles, so a burst
+	// of tree changes and triggers costs one cycle (0: one second).
+	Coalesce time.Duration
+
+	changes door.Signal
 }
+
+// Wake asks for a cycle soon: the tree changed, or someone edited Keycloak.
+// Wakes that arrive while a cycle runs, or within Coalesce of its start, are
+// merged into the next one.
+func (s *Syncer) Wake() { s.changes.Notify() }
 
 func (s *Syncer) logger() *slog.Logger {
 	if s.Log != nil {
@@ -248,21 +259,38 @@ func randomID() string {
 	return hex.EncodeToString(b[:])
 }
 
-// Run polls until ctx is cancelled. A failed cycle is logged and retried, never
-// fatal.
-func (s *Syncer) Run(ctx context.Context, every time.Duration) {
+// Run runs a cycle at start and then whenever Wake is called, until ctx is
+// cancelled. The tree side pushes: WatchTree wakes it when a _SystemElement or
+// _Group changes. Keycloak has no push, so a cycle also runs once safety has
+// passed without one; that interval exists only to catch Keycloak edits nobody
+// announced with a Wake (POST /sync), and can be long. A failed cycle is logged
+// and retried, never fatal.
+func (s *Syncer) Run(ctx context.Context, safety time.Duration) {
 	log := s.logger()
-	ticker := time.NewTicker(every)
-	defer ticker.Stop()
+	coalesce := s.Coalesce
+	if coalesce <= 0 {
+		coalesce = time.Second
+	}
+	retry := failedCycleRetry
 	for {
+		// Captured before the cycle reads anything: a change during the cycle
+		// wakes the next one.
+		changed := s.changes.Changes()
+		notBefore := time.Now().Add(coalesce)
 		report, err := s.Once(ctx)
+		wait := safety
 		switch {
 		case err != nil && ctx.Err() != nil:
 			return // shutting down: not a failure worth logging as one
 		case err != nil:
 			s.Metrics.cycle("failed")
 			log.Error("sync cycle failed, nothing written", "error", err)
+			// A failed read (Keycloak or the node down) is retried sooner than the
+			// safety interval, backing off up to it: nothing pushes its recovery.
+			wait = min(retry, safety)
+			retry = min(retry*2, safety)
 		default:
+			retry = failedCycleRetry
 			s.Metrics.cycle("ok")
 			for _, change := range report.Changes {
 				log.Info(change)
@@ -271,13 +299,14 @@ func (s *Syncer) Run(ctx context.Context, every time.Duration) {
 				log.Warn(problem)
 			}
 		}
-		select {
-		case <-ctx.Done():
+		if !door.WaitChange(ctx, changed, wait, notBefore) {
 			return
-		case <-ticker.C:
 		}
 	}
 }
+
+// failedCycleRetry is the first wait after a failed cycle.
+const failedCycleRetry = 5 * time.Second
 
 // Summary renders a report for a one-shot run.
 func (r Report) Summary() string {

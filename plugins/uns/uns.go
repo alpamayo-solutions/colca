@@ -17,6 +17,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"math"
 	"sort"
 	"strconv"
 	"strings"
@@ -29,17 +30,18 @@ type Class int
 
 // Routing classes; ClassNone is the zero value.
 const (
-	ClassNone       Class = iota
-	ClassData             // _Metric …    node-owned state, authorized by write scope
-	ClassEntity           // _Node, _EnrolledIdentity, _SystemElement, _Signal, _Constant, _Resource
-	ClassDefinition       // _Group, _MetadataType, ...: written by any node, flows down, applied as state
-	ClassCmd              // _Cmd*        write: ancestors/admin, flows down
-	ClassAck              // _Ack         write: owner, flows up
-	ClassGap              // _StreamGap: written by the pruner only; event, no KV, not retained
-	ClassAudit            // _AuditEvent  append-only security event, local/internal write, flows up
-	ClassAlarm            // _AlarmStateChange, _NotificationDispatched: events on their own stream, never behind metrics
-	ClassLog              // _Log: events on their own stream; logs are the loudest class and would crowd out samples
-	ClassAnnotation       // _Annotation: events on their own stream; too many per machine to keep as KV state
+	ClassNone         Class = iota
+	ClassData               // _Metric …    node-owned state, authorized by write scope
+	ClassEntity             // _Node, _EnrolledIdentity, _SystemElement, _Signal, _Constant, _Resource
+	ClassDefinition         // _Group, _MetadataType, ...: written by any node, flows down, applied as state
+	ClassCmd                // _Cmd*        write: ancestors/admin, flows down
+	ClassAck                // _Ack         write: owner, flows up
+	ClassGap                // _StreamGap: written by the pruner only; event, no KV, not retained
+	ClassAudit              // _AuditEvent  append-only security event, local/internal write, flows up
+	ClassAlarm              // _AlarmStateChange, _NotificationDispatched: events on their own stream, never behind metrics
+	ClassLog                // _Log: events on their own stream; logs are the loudest class and would crowd out samples
+	ClassAnnotation         // _Annotation: events on their own stream; too many per machine to keep as KV state
+	ClassServiceState       // _ServiceState: one service's private state, on its own stream, never replicated or on the bus
 )
 
 // Parsed is a decomposed UNS topic: colca/v1/_Contract/{node-id}/{path…}
@@ -109,13 +111,20 @@ func ClassOf(contract string) Class {
 		contract == "_AlarmState" ||
 		// A silence per element and alarm type: retained until it runs out, then
 		// retired by tombstone. It outlives the alarms it covers.
-		contract == "_AlarmSilence":
+		contract == "_AlarmSilence" ||
+		// A person's subscription to one alarm: retained at the alarm's place,
+		// adopted by the node that evaluates it next, retired by tombstone.
+		contract == "_AlarmSubscription":
 		return ClassEntity
 	case contract == "_Group" || contract == "_MetadataType" ||
 		contract == "_AnnotationType" || contract == "_DataModel" ||
 		contract == "_ExternalSystem" || contract == "_SemanticTag" ||
 		contract == PersonalAccessTokenContract:
 		return ClassDefinition
+	// A service's own state (checkpoints, open work), read back only by that
+	// service: see ServiceStateContract.
+	case contract == ServiceStateContract:
+		return ClassServiceState
 	case contract == "_Ack":
 		return ClassAck
 	case contract == "_StreamGap":
@@ -128,13 +137,38 @@ func ClassOf(contract string) Class {
 	return ClassNone
 }
 
+// KeepsActorWitness reports whether a record at topic keeps what the admitting
+// door witnessed about the person beyond who they are -- their verified
+// address and the classes they held at the command's place: a command only,
+// where the service applying it needs them (an alarm subscription that mails
+// them, an administrator ending someone else's). State, events and acks a
+// person's command leads to are read by others and never repeat them.
+func KeepsActorWitness(topic string) bool {
+	p, err := Parse(topic)
+	return err == nil && IsCommand(ClassOf(p.Contract))
+}
+
 // IsState reports whether a class is state rather than an event: latest value
 // per path, KV-projected, retained, and retired by an empty payload. Data,
 // entities and definitions are state; commands, acks and gap markers are
 // events, and retaining them would replay stale instructions. The KV
 // projection, the retained flag and the tombstone rule all ask this.
 func IsState(c Class) bool {
-	return c == ClassData || c == ClassEntity || c == ClassDefinition
+	return c == ClassData || c == ClassEntity || c == ClassDefinition || c == ClassServiceState
+}
+
+// OnBus reports whether a class's records appear on the node's MQTT bus at
+// all. A service's private state does not: it has one reader, the service
+// that wrote it, which reads it back over /kv and /fetch, where every record
+// is authorized on its own. On the bus a subscription filter is all that is
+// checked, and a filter cannot tell one service's state from another's.
+func OnBus(c Class) bool { return c != ClassServiceState }
+
+// OnBusTopic is OnBus for a record's topic. A topic that does not parse is
+// not colca's to keep off the bus.
+func OnBusTopic(topic string) bool {
+	p, err := Parse(topic)
+	return err != nil || OnBus(ClassOf(p.Contract))
 }
 
 // The predicates below let the core ask what a class does without knowing
@@ -393,6 +427,10 @@ var manifestClasses = map[string]Class{
 	"alarm":      ClassAlarm,
 	"annotation": ClassAnnotation,
 	"log":        ClassLog,
+	// Only _ServiceState has this class, and colcad defines it itself: a
+	// bundle that gives it to a contract is refused (internal/contracts). It
+	// is listed so the manifest vector names its stream.
+	"service_state": ClassServiceState,
 }
 
 // ClassFromManifest returns the class a bundle manifest names, and whether the name is known.
@@ -400,6 +438,11 @@ func ClassFromManifest(name string) (Class, bool) {
 	c, ok := manifestClasses[name]
 	return c, ok
 }
+
+// BundleMayDeclare reports whether a contracts bundle may give one of its
+// contracts this class. Service state may not: its owner rule goes by the
+// contract name, so another contract of the class would be unguarded.
+func BundleMayDeclare(c Class) bool { return c != ClassServiceState }
 
 // ManifestClassNames lists every class name a bundle may declare, sorted, so
 // anything that must stay in step can iterate it.
@@ -433,6 +476,8 @@ func StreamFor(c Class) string {
 		return "annotations"
 	case ClassLog:
 		return "logs"
+	case ClassServiceState:
+		return "service_state"
 	case ClassGap:
 		return ""
 	}
@@ -468,21 +513,43 @@ func FetchLogsAck(topic string) (path string, ok bool) {
 	return p.Path, true
 }
 
-// MetricSignalID returns the signal_id of a _Metric record, or "" for any other
-// record. The store keeps it beside the record so a signal filter does not
-// decode every payload it skips.
-func MetricSignalID(topic string, payload []byte) string {
+// MetricHead reads what the store keeps beside a _Metric record, in the one
+// decode the record gets on the write path: its signal_id, which a signal
+// filter matches without decoding the payloads it skips, and its sample time,
+// which decides whether the record becomes the topic's current value.
+//
+// at is the payload's timestamp (unix seconds, the unit publishers use) in
+// unix nanoseconds, rounded as the historian rounds it, or 0 when the payload
+// has no numeric timestamp in range. ok is false for any record that is not a
+// _Metric or does not decode.
+func MetricHead(topic string, payload []byte) (signalID string, at int64, ok bool) {
 	p, err := Parse(topic)
 	if err != nil || !IsMetric(p.Contract) {
-		return ""
+		return "", 0, false
 	}
 	var metric struct {
-		SignalID string `json:"signal_id"`
+		SignalID  string          `json:"signal_id"`
+		Timestamp json.RawMessage `json:"timestamp"`
 	}
 	if json.Unmarshal(payload, &metric) != nil {
-		return ""
+		return "", 0, false
 	}
-	return metric.SignalID
+	return metric.SignalID, sampleNanos(metric.Timestamp), true
+}
+
+// sampleNanos converts a payload timestamp in unix seconds to unix
+// nanoseconds; 0 when it is not a number, or not after the epoch and before
+// the year 2262, where nanoseconds overflow int64.
+func sampleNanos(raw json.RawMessage) int64 {
+	if len(raw) == 0 || raw[0] == '"' || raw[0] == 'n' {
+		return 0
+	}
+	f, err := strconv.ParseFloat(string(raw), 64)
+	if err != nil || f <= 0 || f >= 9.2e9 {
+		return 0
+	}
+	sec := math.Floor(f)
+	return int64(sec)*int64(time.Second) + int64(math.Round((f-sec)*float64(time.Second)))
 }
 
 // SignalTopicForMetric returns the _Signal topic with p's node and path: the
@@ -592,6 +659,8 @@ func Validate(contract string, payload []byte) error {
 	switch {
 	case contract == "_Metric":
 		return reqNum("v")
+	case contract == ServiceStateContract:
+		return validateServiceState(payload)
 	case contract == "_Ack":
 		if err := reqStr("correlation_id"); err != nil {
 			return err
@@ -615,6 +684,10 @@ func Validate(contract string, payload []byte) error {
 		}
 		if err := reqNum("occurred_at"); err != nil {
 			return err
+		}
+		if field, limit, found := auditFieldTooLong(m); found {
+			return &FieldError{Field: field, Keyword: "maxLength", Limit: strconv.Itoa(limit),
+				Err: fmt.Errorf("%s: field %q is longer than %d characters", contract, field, limit)}
 		}
 		if raw, exists := m["metadata"]; exists {
 			metadata, ok := raw.(map[string]any)
@@ -684,7 +757,15 @@ func Validate(contract string, payload []byte) error {
 				return fmt.Errorf("_Signal: replication_policy must be replicate_to_parents or source_local_only")
 			}
 		}
-		return nil
+		if value, present := m["access"]; present {
+			if access, ok := value.(string); !ok || !signalAccessValues[access] {
+				return fmt.Errorf("_Signal: access must be read or read_write")
+			}
+		}
+		if err := validateSignalValueDefinitionsField(m); err != nil {
+			return err
+		}
+		return validateSignalRelationshipsField(m)
 	case contract == "_Node" || contract == "_ServiceDetails" ||
 		contract == "_SystemElement" ||
 		contract == "_ExternalReference" || contract == "_Group" ||

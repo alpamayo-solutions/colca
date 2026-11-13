@@ -394,6 +394,34 @@ def test_a_silence_is_retained_state_of_its_own():
     assert set(silence["schema"]["required"]) == {"reason", "until", "silenced_by", "silenced_at"}
 
 
+def test_an_alarm_subscription_is_retained_state_at_the_alarms_place():
+    """A person's on-call subscription to one alarm: retained so the node that
+    evaluates the alarm next can adopt it, retired by tombstone, naming who
+    subscribed, through which channel, and for which window."""
+    body, _ = gb.build_bundle()
+    subscription = body["contracts"]["_AlarmSubscription"]
+    schema = subscription["schema"]
+
+    assert subscription["class"] == "entity"
+    assert subscription["tombstone"] is True
+    assert set(schema["required"]) == {
+        "subscription_id",
+        "alarm_id",
+        "subscriber_id",
+        "channel_id",
+        "channel_kind",
+        "active_from",
+        "active_until",
+        "created_at",
+        "updated_at",
+    }
+    for optional in ("subscriber_label", "undeliverable"):
+        assert optional in schema["properties"], optional
+    # Everyone who reads the alarm reads this record: no address in it.
+    assert not any("email" in field for field in schema["properties"])
+    assert set(schema["properties"]["channel_kind"]["enum"]) == {"email", "workbench"}
+
+
 def test_standing_alarm_is_retained_state_with_a_closed_status_vocabulary():
     body, _ = gb.build_bundle()
     standing = body["contracts"]["_AlarmState"]
@@ -491,6 +519,43 @@ def test_audit_event_is_append_only_and_has_stable_required_fields():
     ]
 
 
+def test_every_audit_text_field_is_bounded():
+    """An audit record is stored in bounded columns by the read side, so a text
+    field without a limit is a record the node accepts and the archive cannot
+    hold: an API denial's 70-character operation was set aside that way. A new
+    text field must declare its limit to pass."""
+    import typing
+
+    from colca_data_contracts import AuditEvent, field_limits
+
+    limits = field_limits(AuditEvent)
+    hints = typing.get_type_hints(AuditEvent)
+    text_fields = {name for name, hint in hints.items() if hint in (str, str | None)}
+    assert text_fields == {
+        "event_id",
+        "operation",
+        "actor_id",
+        "actor_label",
+        "entity_type",
+        "entity_id",
+        "correlation_id",
+        "reason_code",
+    }
+    unbounded = sorted(name for name in text_fields if limits.get(name) is None or limits[name].max_length is None)
+    assert not unbounded, f"_AuditEvent text fields without a MaxLength: {unbounded}"
+
+    body, _ = gb.build_bundle()
+    properties = body["contracts"]["_AuditEvent"]["schema"]["properties"]
+    for name in text_fields:
+        assert properties[name]["maxLength"] == limits[name].max_length
+    # The longest values today's producers write fit: an API denial's method
+    # and route, and the label of a key the node does not know.
+    assert limits["operation"].max_length >= 512
+    assert limits["actor_label"].max_length >= len("unknown key ") + 64
+    # The time is turned into a date by the read side, so it is bounded to what a date holds.
+    assert properties["occurred_at"]["maximum"] == limits["occurred_at"].maximum == 253402300799999
+
+
 def test_definitions_are_their_own_class_and_retractable():
     """Definitions have their own routing class, and an empty payload retracts one."""
     body, _ = gb.build_bundle()
@@ -560,12 +625,13 @@ def test_every_definition_is_addressable_by_id():
 #: loses its `ULID` annotation, or a new id field without one, fails here.
 ULID_CONSTRAINED_FIELDS = {
     "_SystemElement": ["id", "parent_id", "semantic_type_id"],
-    "_Signal": ["id", "system_element_id", "data_tag", "semantic_type_id"],
+    "_Signal": ["id", "system_element_id", "data_tag", "semantic_type_id", "relationships/items/target_signal_id"],
     "_Constant": ["id", "system_element_id", "semantic_type_id"],
     "_Resource": ["id", "system_element_id"],
     "_ExternalReference": ["id", "external_system_id"],
     "_Finding": ["signal_id"],
     "_AlarmState": ["alarm_id", "signal_id"],
+    "_AlarmSubscription": ["alarm_id"],
     # annotation_type_id stays unconstrained until the golden annotation-id
     # vectors derive from ULID type ids — see payload.Annotation.
     "_Annotation": [
@@ -693,6 +759,10 @@ def test_every_declared_field_limit_reaches_the_bundle():
         ("precision", 11, False),
         ("precision", 1.5, False),
         ("precision", None, True),
+        ("process_tolerance", 0, True),
+        ("process_tolerance", 0.5, True),
+        ("process_tolerance", -0.1, False),
+        ("process_tolerance", None, True),
     ],
 )
 def test_a_signal_field_outside_its_limit_is_refused(field, value, valid):

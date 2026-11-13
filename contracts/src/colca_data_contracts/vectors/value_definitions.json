@@ -1,0 +1,234 @@
+{
+  "_comment": "Golden vectors for a signal's value_definitions (colca_data_contracts.value_definitions). The Python suite (contracts/tests/test_value_definitions.py) checks key_kinds and the limits against the definition and judges every case; colca's Go suite (plugins/uns/value_definitions_test.go) does the same with its copy. `refusal` is what the node answers for the first problem in key order (sorted by the key's text), null when the definition is valid. A case with `generated_entries` stands for a definition of that many entries, keys \"0\" upward, each meaning \"v\".",
+  "key_kinds": {
+    "boolean": "boolean",
+    "int": "int",
+    "integer": "int",
+    "string": "string"
+  },
+  "max_entries": 500,
+  "max_text": 120,
+  "cases": [
+    {
+      "name": "absent definition is valid for any type",
+      "data_type": "float",
+      "definitions": null,
+      "refusal": null
+    },
+    {
+      "name": "empty definition is valid for any type",
+      "data_type": "json",
+      "definitions": {},
+      "refusal": null
+    },
+    {
+      "name": "int codes",
+      "data_type": "int",
+      "definitions": {
+        "0": "no fault",
+        "202": "Sieve blocked",
+        "-1": "sensor lost"
+      },
+      "refusal": null
+    },
+    {
+      "name": "slot vocabulary integer",
+      "data_type": "integer",
+      "definitions": {
+        "0": "UNKNOWN",
+        "4": "EXECUTING"
+      },
+      "refusal": null
+    },
+    {
+      "name": "boolean",
+      "data_type": "boolean",
+      "definitions": {
+        "true": "open",
+        "false": "closed"
+      },
+      "refusal": null
+    },
+    {
+      "name": "string codes",
+      "data_type": "string",
+      "definitions": {
+        "E-17 ": "Door open",
+        "SUSPENDED": "Suspended"
+      },
+      "refusal": null
+    },
+    {
+      "name": "int64 bounds",
+      "data_type": "int",
+      "definitions": {
+        "9223372036854775807": "max",
+        "-9223372036854775808": "min"
+      },
+      "refusal": null
+    },
+    {
+      "name": "umlauts count as one character each",
+      "data_type": "int",
+      "definitions": {
+        "1": "ääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääää"
+      },
+      "refusal": null
+    },
+    {
+      "name": "float takes none",
+      "data_type": "float",
+      "definitions": {
+        "1": "one"
+      },
+      "refusal": "invalid_field: value_definitions: data_type"
+    },
+    {
+      "name": "datetime takes none",
+      "data_type": "datetime",
+      "definitions": {
+        "1": "one"
+      },
+      "refusal": "invalid_field: value_definitions: data_type"
+    },
+    {
+      "name": "unknown data type takes none",
+      "data_type": null,
+      "definitions": {
+        "1": "one"
+      },
+      "refusal": "invalid_field: value_definitions: data_type"
+    },
+    {
+      "name": "not an object",
+      "data_type": "int",
+      "definitions": [
+        [
+          "1",
+          "one"
+        ]
+      ],
+      "refusal": "invalid_field: value_definitions: type"
+    },
+    {
+      "name": "meaning not text",
+      "data_type": "int",
+      "definitions": {
+        "1": 1
+      },
+      "refusal": "invalid_field: value_definitions: type"
+    },
+    {
+      "name": "leading zero",
+      "data_type": "int",
+      "definitions": {
+        "0202": "x"
+      },
+      "refusal": "invalid_field: value_definitions: propertyNames int"
+    },
+    {
+      "name": "plus sign",
+      "data_type": "int",
+      "definitions": {
+        "+1": "x"
+      },
+      "refusal": "invalid_field: value_definitions: propertyNames int"
+    },
+    {
+      "name": "negative zero",
+      "data_type": "int",
+      "definitions": {
+        "-0": "x"
+      },
+      "refusal": "invalid_field: value_definitions: propertyNames int"
+    },
+    {
+      "name": "decimal point",
+      "data_type": "int",
+      "definitions": {
+        "1.0": "x"
+      },
+      "refusal": "invalid_field: value_definitions: propertyNames int"
+    },
+    {
+      "name": "beyond int64",
+      "data_type": "int",
+      "definitions": {
+        "9223372036854775808": "x"
+      },
+      "refusal": "invalid_field: value_definitions: propertyNames int"
+    },
+    {
+      "name": "capitalised boolean",
+      "data_type": "boolean",
+      "definitions": {
+        "True": "x"
+      },
+      "refusal": "invalid_field: value_definitions: propertyNames boolean"
+    },
+    {
+      "name": "empty string key",
+      "data_type": "string",
+      "definitions": {
+        "": "x"
+      },
+      "refusal": "invalid_field: value_definitions: propertyNames string"
+    },
+    {
+      "name": "string key too long",
+      "data_type": "string",
+      "definitions": {
+        "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx": "x"
+      },
+      "refusal": "invalid_field: value_definitions: propertyNames string"
+    },
+    {
+      "name": "empty meaning",
+      "data_type": "int",
+      "definitions": {
+        "1": "  "
+      },
+      "refusal": "invalid_field: value_definitions: minLength 1"
+    },
+    {
+      "name": "meaning too long",
+      "data_type": "int",
+      "definitions": {
+        "1": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+      },
+      "refusal": "invalid_field: value_definitions: maxLength 120"
+    },
+    {
+      "name": "meaning with surrounding whitespace",
+      "data_type": "int",
+      "definitions": {
+        "1": " open"
+      },
+      "refusal": "invalid_field: value_definitions: whitespace"
+    },
+    {
+      "name": "too many entries",
+      "data_type": "int",
+      "definitions": null,
+      "refusal": "invalid_field: value_definitions: maxProperties 500",
+      "generated_entries": 501
+    },
+    {
+      "name": "exactly the limit",
+      "data_type": "int",
+      "definitions": null,
+      "refusal": null,
+      "generated_entries": 500
+    },
+    {
+      "name": "first problem in key order",
+      "data_type": "int",
+      "definitions": {
+        "2": "",
+        "10": "ok",
+        "01": "x"
+      },
+      "refusal": "invalid_field: value_definitions: propertyNames int"
+    }
+  ]
+}

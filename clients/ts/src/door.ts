@@ -51,6 +51,14 @@ export interface Page {
   next: number;
   /** Where this page started reading; absent from nodes before 0.18.2. */
   start?: number;
+  /** The stream's next offset when the page was read; absent from older nodes. */
+  head?: number;
+  /**
+   * True when the page stopped before `head` (its `max`, byte bound or scan
+   * budget). An empty page with `more` was cut short, not caught up: read on
+   * from `next` without waiting for a wake-up. Absent from older nodes.
+   */
+  more?: boolean;
   gap?: Gap;
 }
 
@@ -219,6 +227,8 @@ export class Door {
       records: (body.records ?? []).map(toRecord),
       next: body.next,
       start: body.from,
+      head: body.head,
+      more: body.more,
       gap: body.gap ? toGap(body.gap) : undefined,
     };
   }
@@ -376,6 +386,8 @@ interface WirePage {
   records?: WireRecord[];
   next: number;
   from?: number;
+  head?: number;
+  more?: boolean;
   gap?: WireGap;
 }
 

@@ -3,6 +3,7 @@ package store
 import (
 	"fmt"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -85,5 +86,31 @@ func TestReplicationSkipsAdvanceOnlyTheChildProgress(t *testing.T) {
 	}
 	if _, _, err = s.ApplyReplicated("child", "entities", []ReplRecord{{SkipFrom: 1, ChildOffset: 3}}); err == nil {
 		t.Fatal("accepted non-metric skip")
+	}
+}
+
+// BenchmarkMetricAppendPolicy is the replication decision of one metric whose
+// signal carries a full definition, as every append of a sample makes it.
+//
+//	go test ./internal/store -run '^$' -bench MetricAppendPolicy
+func BenchmarkMetricAppendPolicy(b *testing.B) {
+	s, err := Open(b.TempDir())
+	if err != nil {
+		b.Fatal(err)
+	}
+	b.Cleanup(func() { s.Close() })
+	signal := `{"id":"s1","name":"temperature","data_type":"float","unit":"degC","replication_policy":"source_local_only",` +
+		`"value_definitions":[{"value":0,"label":"off"},{"value":1,"label":"on"}],"description":"` + strings.Repeat("d", 300) + `"}`
+	if _, _, err := s.Append("entities", []Record{{Topic: "colca/v1/_Signal/n1/temp", Payload: []byte(signal), KVPath: "temp", KVNode: "n1"}}); err != nil {
+		b.Fatal(err)
+	}
+	rec := Record{Topic: "colca/v1/_Metric/n1/temp", Payload: []byte(`{"signal_id":"s1","value":42}`)}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if local, err := s.metricSourceLocalOnly(rec); err != nil || !local {
+			b.Fatal(local, err)
+		}
 	}
 }

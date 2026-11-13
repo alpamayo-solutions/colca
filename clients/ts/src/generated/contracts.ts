@@ -108,6 +108,22 @@ export type AlarmStateChange = {
   [key: string]: unknown;
 };
 
+/** `_AlarmSubscription` — stream class `entity`. */
+export type AlarmSubscription = {
+  active_from: number;
+  active_until: number;
+  alarm_id: string;
+  channel_id: string;
+  channel_kind: "email" | "workbench";
+  created_at: number;
+  subscriber_id: string;
+  subscriber_label?: string;
+  subscription_id: string;
+  undeliverable?: string;
+  updated_at: number;
+  [key: string]: unknown;
+};
+
 /** `_Annotation` — stream class `annotation`. */
 export type Annotation = {
   annotation_id: string;
@@ -532,6 +548,7 @@ export type ServiceDetails = {
 
 /** `_Signal` — stream class `entity`. */
 export type Signal = {
+  access?: "read" | "read_write";
   bind_intent?: null | {
     connector: string;
     variable: string;
@@ -553,11 +570,17 @@ export type Signal = {
   min_value?: null | number;
   name: string;
   precision?: number | null;
+  process_tolerance?: null | number;
+  relationships?: {
+    relationship_type: "actual" | "upper_limit" | "lower_limit" | "feedback";
+    target_signal_id: string;
+  }[];
   replication_policy?: "replicate_to_parents" | "source_local_only";
   semantic_type_id?: null | string;
   system_element_id?: null | string;
   unit?: null | string;
   updated_at?: null | string;
+  value_definitions?: Record<string, unknown>;
   [key: string]: unknown;
 };
 
@@ -582,6 +605,7 @@ export const CONTRACTS = {
   "_AlarmSilence": { class: "entity", tombstone: true },
   "_AlarmState": { class: "entity", tombstone: true },
   "_AlarmStateChange": { class: "alarm", tombstone: false },
+  "_AlarmSubscription": { class: "entity", tombstone: true },
   "_Annotation": { class: "annotation", tombstone: false },
   "_AnnotationType": { class: "definition", tombstone: true },
   "_AuditEvent": { class: "audit", tombstone: false },
@@ -625,6 +649,7 @@ export interface PayloadByContract {
   "_AlarmSilence": AlarmSilence;
   "_AlarmState": AlarmState;
   "_AlarmStateChange": AlarmStateChange;
+  "_AlarmSubscription": AlarmSubscription;
   "_Annotation": Annotation;
   "_AnnotationType": AnnotationType;
   "_AuditEvent": AuditEvent;

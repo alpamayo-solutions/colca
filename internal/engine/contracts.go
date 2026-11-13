@@ -98,9 +98,13 @@ func (e *Engine) rejectDenied(reason string, actor Attribution, operation string
 	return Result{}, &RejectError{Reason: reason, Denied: true, Err: fmt.Errorf(format, args...)}
 }
 
+// _ServiceState is colcad's too: who may read and write it is decided by the
+// contract name (uns.ServiceStateContract), so no bundle may redefine it. The
+// same holds for the enrollment contracts.
 var builtinOnly = map[string]bool{
 	"_StreamGap": true, "_EnrolledIdentity": true,
 	uns.EnrollmentRequestContract: true, uns.EnrollmentPreapprovalContract: true,
+	uns.ServiceStateContract: true,
 }
 
 // SetContracts installs the loaded bundle table (node startup; nil = floor).

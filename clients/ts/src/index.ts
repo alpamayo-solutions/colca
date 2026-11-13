@@ -4,7 +4,8 @@
  * ```ts
  * const door = new Door({ baseUrl: "http://colca", service: "my-app" });
  * const stream = new Stream(door, "annotations", door.cursorName("panels"));
- * for await (const record of stream.follow()) {
+ * const bell = new Doorbell(); // rung whenever the stream may have grown
+ * for await (const record of stream.follow({ bell })) {
  *   console.log(record.topic, record.payload);
  * }
  * ```
@@ -25,7 +26,8 @@ export type {
   SelfInfo,
 } from "./door.js";
 
-export { Doorbell } from "./doorbell.js";
+export { Doorbell, IDLE_DRAIN_MS } from "./doorbell.js";
+export type { AfterOptions, Wake } from "./doorbell.js";
 export { Stream } from "./stream.js";
 export type { FollowOptions, StreamOptions } from "./stream.js";
 

@@ -23,10 +23,13 @@ alert first:
 | `colca_cursor_unread_age_seconds` | age of the oldest record waiting that the consumer actually reads (its fetch filter applied); `0` on an idle stream. Past `cursors.lag_alarm_after` (default `60s`, `0` writes no finding) the node also writes a `cursor_lag` finding about the service |
 | `colca_rejected_publishes_total` | rises: clients send what the node refuses; `reason` says why |
 | `colca_auth_rejections_total` | rises: unknown keys or bad tokens at a door |
+| `colca_audit_denials_suppressed_total` | rises: a caller repeats a request the node refuses. The audit holds the first denial and one record per five minutes with the count (`metadata.repeated`) |
 | `colca_replication_integrity_failures_total` | above `0`: a child pruned records before its parent received them |
 | `colca_store_incarnation_changes_total` | rises: this node's store was restored from a backup, replaced, or given a new incarnation by an operator; its children re-sync |
 | `colca_uplink_resync_active` | stays `1`: this node is still sending again what its restored parent lacks |
 | `colca_uplink_resync_unreplayable_records_total` | above `0`: a restored parent lacks records this node had already pruned |
+| `colca_uplink_refused_total` | rises: the parent answered a push and refused it (`4xx`); the lane is held while it does |
+| `colca_uplink_set_aside_total` | above `0`: a record the parent kept refusing was set aside and is **not** at the parent (see [Records the parent refuses](#records-the-parent-refuses)) |
 | `colca_repl_child_ahead_of_store_total` | rises: a child too old to re-sync is ahead of this node's store |
 | `colca_host_clock_synchronized` | stays `0`: no NTP daemon vouches for the host's clock (see [Clocks](#clocks)) |
 | `abs(colca_clock_parent_skew_seconds)` | above `0.5` for minutes, and at once above `5`: this node and its parent disagree about the time |
@@ -46,7 +49,7 @@ say who uses them:
 | `colca_http_kv_requests_total` | `caller`, `contract` (one contract, `multiple` or `all`), `prefix_depth` (`0` is the whole node, up to `5+`) | whole-node reads (`contract="all",prefix_depth="0"`) are the ones to remove first |
 | `colca_http_kv_entries` | `caller` | histogram of entries per `/kv` page |
 | `colca_http_fetch_requests_total` | `caller`, `stream` | a follower polling an idle stream shows a steady rate; `/watch` removes it |
-| `colca_http_request_limited_by_caller_total` | `route` (the route pattern, such as `GET /kv`), `caller` | 429s per caller; `colca_http_request_limited_total` has them by door and class |
+| `colca_http_request_limited_by_caller_total` | `route` (the route pattern, such as `GET /kv`), `caller` | 429s per caller; `colca_http_request_limited_total` has them by door, class and `reason` |
 
 A caller's `colca_http_request_limited_by_caller_total` series exists at `0`
 from its first request on a route, so "never limited" reads as `0`, not as a
@@ -67,6 +70,15 @@ downlink polls at once. `colca_http_request_limited_total{door="repl"}` counts
 refusals by class: `node`, `auth` (by address), `replication` (pushes),
 `downlink` and `transfer` (files).
 
+Every refusal also carries `reason`, the bound that refused it:
+`rate_limit` (the caller's request rate; the answer carries `Retry-After`),
+`concurrency_limit` (the caller already holds the most open requests of the
+class, such as `/watch` streams; it clears when the caller closes one),
+`global_concurrency_limit` (the node holds the most of the class it serves),
+`caller_limit` (the node tracks the most callers it may) and `busy` (a parent
+shedding pushes its store or memory cannot take yet). Queries that sum over
+door and class keep working.
+
 A parent commits the pushes that arrive while a commit is being synced
 together in the next one, up to 4096 records a commit, so its children are
 not limited to one sync each. A push is answered once its records are on disk.
@@ -78,6 +90,36 @@ of its memory limit in request bytes, a new push is answered `429` with
 child keeps the batch, waits as long as the parent asked (with jitter, so its
 siblings do not return in step) and sends it again; nothing is dropped, and
 the uplink logs a busy parent as a warning, not as a refusal.
+
+### Records the parent refuses
+
+A parent that answers a push and refuses it (a `4xx` other than `429`, `401`
+or the `409` of a changed store) has read the batch and said no: usually a
+record larger than its `limits.max_record_bytes`, or one on a stream it may not
+rise on. Order within a stream never changes, so the uplink cannot send what
+follows past a refused record. It isolates it instead: the refused batch is
+sent again at half its size, down to the one record the parent refuses, so the
+records before it rise at once. The batch grows back once the parent takes
+one.
+
+That record is held and sent again for 15 minutes, since the cause is often
+fixed on the parent (a rolling upgrade, a raised limit). After that it is set
+aside: the node copies it into its store outside the stream, moves the uplink
+cursor past it, counts `colca_uplink_set_aside_total{stream}`, logs an error,
+and writes the retained `_Finding` `<root>/v1/_Finding/<node>/uplink_set_aside`
+naming each record (stream, offset, topic, size and what the parent said). The
+lane continues behind it. **A set-aside record never reaches the parent**: it
+is lost there, and that is what the finding and the error say.
+
+The node does not send a set-aside record again by itself. The parent drops
+every child offset at or below its high-water mark, so the record cannot be
+pushed later at its own offset, and appending it again under a new offset
+could put an old state value over a newer one at the parent. What to do with
+it is the operator's decision: `GET /uplink/set-aside` on the child's admin
+door lists the copies with their payloads, and `DELETE
+/uplink/set-aside/{stream}/{offset}` clears one once it is dealt with. The
+copies survive the stream's retention; the finding retires when the last one
+is cleared.
 
 colcad and colca-historian set Go's memory limit to 75 % of their cgroup's
 memory ceiling (cgroup v1 or v2, the process's own cgroup and the smallest
@@ -122,6 +164,12 @@ holds them. Records waiting for the bus count against the push budget above.
 | `colca_mqtt_delivered_messages_total` | `door` (`mqtt`, `local`, `human`) | PUBLISH packets written to subscribers; with `colca_ingest_records_total` it gives the node's MQTT in and out |
 | `colca_mqtt_delivered_payload_bytes_total` | `door` | their payload bytes |
 | `colca_mqtt_publish_dropped_total` | | publishes dropped because a subscriber's queue was full |
+| `colca_mqtt_offline_sessions` | | sessions kept for a client that is not connected |
+| `colca_mqtt_offline_queued_messages`, `colca_mqtt_offline_queued_bytes` | | what is queued in memory for them; bounded by [`mqtt_limits.max_offline_*`](configuration.md#sessions-of-clients-that-are-away) |
+| `colca_mqtt_offline_dropped_total` | | messages not queued because an offline session's queue was full; the log has one line per session and absence |
+| `colca_mqtt_offline_sessions_ended_total` | `reason` (`expired`, `identity_removed`, `retired`) | sessions removed without their client returning |
+| `colca_mqtt_stalled_clients` | | connected clients over the per-client bounds that acknowledged nothing for 30 s; nothing more is queued for them until they acknowledge |
+| `colca_mqtt_unacked_dropped_total` | | messages dropped for such a client; the log has one line per client and stall |
 
 ### What the log gate holds back
 
@@ -251,10 +299,12 @@ block of [`/healthz`](http-api.md#the-clock-in-healthz):
 | Metric | Meaning |
 |---|---|
 | `colca_host_clock_synchronized` | `1` when the kernel reports the clock as synchronized by an NTP daemon, `0` when not |
-| `colca_host_clock_estimated_error_seconds` | the kernel's estimate of the clock's error |
-| `colca_host_clock_max_error_seconds` | the kernel's bound on the error; it grows while no daemon updates the clock |
-| `colca_clock_parent_skew_seconds` | the parent's clock minus this node's, from the `now_ms` on the latest `/downlink` or `/replicate` response; positive when the parent is ahead |
+| `colca_host_clock_estimated_error_seconds` | the NTP service's estimate of the clock's error; absent where the service keeps none |
+| `colca_host_clock_max_error_seconds` | the kernel's bound on the error; the service sets it at every update and the kernel adds 0.5 ms a second |
+| `colca_host_clock_stale_bound_seconds` | the part of that bound one poll interval does not explain: `0` while the clock is updated, then 0.5 ms for each second since an update came due |
+| `colca_clock_parent_skew_seconds` | the parent's clock minus this node's, from the `now_ms` on the latest `/downlink` or `/replicate` response whose round trip was at most 0.5 s; positive when the parent is ahead |
 | `colca_clock_parent_sample_age_seconds` | seconds since that measurement |
+| `colca_clock_parent_samples_discarded_total` | responses not used for the measurement because their round trip was longer than 0.5 s |
 
 - **The host series** come from a read-only `adjtimex` call, which needs no
   privilege and passes Docker's default seccomp profile, so they work in the
@@ -263,15 +313,47 @@ block of [`/healthz`](http-api.md#the-clock-in-healthz):
   `/healthz` reports `null`; node-exporter's `node_timex_sync_status`,
   `node_timex_estimated_error_seconds` and `node_timex_maxerror_seconds` carry
   the same reading from the host itself.
+- **Which host series to trust depends on the NTP service.** chrony and ntpd
+  keep the kernel's estimate and its bound. systemd-timesyncd keeps the
+  synchronized flag and the bound only: it writes an estimate of 0 at every
+  update, so `colca_host_clock_estimated_error_seconds` is absent on such a
+  host and `/healthz` reports `null`. The bound works under all three: the
+  service sets it when it updates the clock (to 0 or to its root distance) and
+  the kernel adds 500 µs every second, which makes it a record of how long
+  ago the last update was. One poll interval of a healthy service adds at
+  most 1.024 s (2048 s, systemd-timesyncd's longest), and
+  `colca_host_clock_stale_bound_seconds` is the bound above that: `0` on a
+  healthy host, `0.5` when no update arrived for 51 minutes, `5` after
+  3 h 21 min. At a bound of 16 s (8 h 53 min) the kernel declares the clock
+  unsynchronized. A service configured to poll less often than every 2048 s
+  shows a stale bound between polls.
 - **The parent series** exist on a node with a parent once the parent has
-  answered, and never on a root. The measurement is off by the response's
-  network latency, a few milliseconds on a LAN. It catches what the kernel's
-  verdict cannot: two hosts that are each synchronized, to sources that
-  disagree. It is a measurement only. A node whose clock differs from its
+  answered, and never on a root. The node notes its clock when the request
+  leaves and when the response is read; the parent states its clock (`now_ms`)
+  and how long it had the request by then (`held_ms`: a long poll's wait, an
+  ingest). The round trip is the exchange minus that hold, and the parent's
+  clock is compared with the middle of it, so the measurement is off by at most
+  half the round trip: a few milliseconds on a LAN. It catches what the
+  kernel's verdict cannot: two hosts that are each synchronized, to sources
+  that disagree. It is a measurement only. A node whose clock differs from its
   parent's keeps deciding on its own clock.
+- **A slow or stalled link is not skew.** A response whose round trip is
+  longer than 0.5 s, the warning threshold below, could be off by more than
+  half that threshold, so it cannot show a skew of that size. It is not used:
+  the series keep the previous measurement,
+  `colca_clock_parent_sample_age_seconds` keeps growing, and
+  `colca_clock_parent_samples_discarded_total` counts it. The first response
+  after a link that dropped packets for some seconds is such a response. On a
+  link whose round trip is always above 0.5 s the skew is never measured; the
+  growing sample age shows that. A parent that predates `held_ms` has the whole
+  exchange counted as round trip, so under it only responses that came back
+  within 0.5 s are used, and a long poll that waited is not.
 - **Alert** on `colca_host_clock_synchronized == 0` for 15 minutes, on
-  `max(abs(colca_clock_parent_skew_seconds), colca_host_clock_estimated_error_seconds)`
-  above `0.5` for 10 minutes (warning) and above `5` for 5 minutes (critical).
+  the largest of `abs(colca_clock_parent_skew_seconds)`,
+  `colca_host_clock_estimated_error_seconds` and
+  `colca_host_clock_stale_bound_seconds` above `0.5` for 10 minutes (warning)
+  and above `5` for 5 minutes (critical). The stale bound is the term that
+  fires under every NTP service; the estimate adds what chrony and ntpd know.
   The node's own `clock` health metric uses the same two thresholds.
 - **The log** has one line when the skew to the parent passes 5 seconds
   (`clock skew to the parent exceeds the alarm threshold`) and one when it is
@@ -291,12 +373,19 @@ reason `time_sync` are gone. Nodes can be upgraded in any order:
   parent now answers with its own wall clock rather than a time corrected
   towards the root, so the correction reaches one level, not the whole tree.
 - **An upgraded child under an older parent** measures its skew against the
-  parent's `now_ms` and corrects nothing.
+  parent's `now_ms` and corrects nothing. Such a parent sends no `held_ms`, so
+  the child uses only its responses that came back within 0.5 s.
 - **An older machine** still subscribes to `<root>/v1/_TimeSync/+` when it
-  connects. The node refuses that one filter (SUBACK `0x80`, counted in
-  `colca_acl_denials_total{action="sub"}`, with an audit event) and leaves the
-  session and its command subscription alone. The machine waits out its hold
-  (10 seconds by default) after each connect, then decides on its own clock.
+  connects. The node refuses that one filter (SUBACK `0x80`, or `0x87` over
+  MQTT 5; counted in `colca_acl_denials_total{action="sub"}`, with an audit
+  event) and leaves the session and its command subscription alone. The
+  machine waits out its hold (10 seconds by default) after each connect, then
+  decides on its own clock. The refusal does not depend on who asks: a filter
+  that names a contract the node does not define is refused on the machine
+  door, the local door and the people's door, also for an identity that may
+  read everything, because nothing is ever published there. A filter with a
+  wildcard at the contract level (`<root>/v1/+/…`, `<root>/#`) names no
+  contract and is judged by the read grants as before.
 - A publish to `<root>/v1/_TimeSync/…` is refused like any topic the grammar
   does not know and counted in `colca_rejected_publishes_total{reason="grammar"}`.
 
@@ -663,9 +752,11 @@ started 65 minutes ago or longer by the database's clock, naming the listed
 signals it wrote into that hour, and sends `NOTIFY historian_late_write` when
 it appended one. This happens in the transaction that writes the samples: a
 sample is never stored without its mark, and a mark is never visible before
-its samples. An offline `colca-historian import` marks the same way. Without
-the relations the mark statement fails and the page is retried; the historian
-writes no page unmarked.
+its samples. An offline `colca-historian import` marks the same way. The
+historian writes no page unmarked, so it checks for both relations when it
+starts and exits at once, naming the missing one, when the reader's migrations
+have not run (PREKIT: the api's historian migration `0005_metric_statistics`).
+It does not wait for them; start it after the migrations.
 
 Marking never holds ingestion up: it is a plain insert, with no unique key, no
 conflict handling and no table lock. A signal that is not listed writes nothing,

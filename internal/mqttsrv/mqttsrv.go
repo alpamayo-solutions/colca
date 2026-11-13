@@ -73,6 +73,13 @@ type colcaHook struct {
 	closing atomic.Bool
 	// publishing counts client publishes admitted before closing whose PUBACK is not
 	// written yet; admitted holds the client of each. Close waits for them.
+	// offline bounds what is queued for sessions whose client is away.
+	offline *offlineSessions
+	// unacked bounds what is held for connected clients that do not acknowledge.
+	unacked *unackedClients
+	// retiring holds the clients that retired their own _ServiceDetails on this
+	// connection: their session ends with the connection.
+	retiring   sync.Map // *mqtt.Client -> struct{}
 	pubDone    door.Signal
 	publishing atomic.Int64
 	admitted   sync.Map // *mqtt.Client -> struct{}
@@ -101,6 +108,19 @@ func (h *colcaHook) setEngine(e *engine.Engine) {
 
 func (h *colcaHook) auditDenied(operation, reason, door string, entry *uns.Entry, metadata map[string]any) {
 	h.auditDeniedAt(operation, reason, door, entry, metadata, "", "")
+}
+
+// auditUnknownKey records a connection refused because its key is not
+// enrolled, under the key's fingerprint.
+func (h *colcaHook) auditUnknownKey(door, pub string) {
+	eng := h.engine()
+	if eng == nil {
+		return
+	}
+	_ = eng.RecordDenial(engine.AuditDenial{
+		Operation: "authenticate", ReasonCode: metrics.AuthUnknownKey,
+		Metadata: map[string]any{"door": door}, Peer: identity.Fingerprint(pub),
+	})
 }
 
 func (h *colcaHook) auditDeniedAt(operation, reason, door string, entry *uns.Entry,
@@ -140,6 +160,9 @@ func (h *colcaHook) Provides(b byte) bool {
 		mqtt.OnAuthPacket,
 		mqtt.OnPacketEncode,
 		mqtt.OnSelectSubscribers,
+		mqtt.OnSessionEstablished,
+		mqtt.OnClientExpired,
+		mqtt.OnQosComplete,
 	}, b)
 }
 
@@ -252,7 +275,7 @@ func (h *colcaHook) OnConnectAuthenticate(cl *mqtt.Client, pk packets.Packet) bo
 	if !ok {
 		h.log.Warn("mqtt auth rejected: key not enrolled", "user", user)
 		h.metrics.AuthReject(metrics.DoorMQTT, metrics.AuthUnknownKey)
-		h.auditDenied("authenticate", metrics.AuthUnknownKey, metrics.DoorMQTT, nil, nil)
+		h.auditUnknownKey(metrics.DoorMQTT, pub)
 		return false
 	}
 	if !entry.MayUseDoor(uns.DoorMQTT) {
@@ -285,7 +308,7 @@ func (h *colcaHook) OnACLCheck(cl *mqtt.Client, topic string, write bool) bool {
 		return h.humanACL(cl, topic)
 	}
 	entry, ok := h.reg.Get(string(cl.Properties.Username))
-	if !ok || !uns.Authorize(h.scope(), entry, uns.ActSub, topic) {
+	if !ok || h.namesUnknownContract(topic) || !uns.Authorize(h.scope(), entry, uns.ActSub, topic) {
 		h.log.Warn("mqtt subscribe denied", "ulid", string(cl.Properties.Username), "filter", topic)
 		h.metrics.ACLDeny(metrics.ACLSub)
 		h.auditDenied("read", "subscribe_denied", metrics.DoorMQTT, entry,
@@ -293,6 +316,21 @@ func (h *colcaHook) OnACLCheck(cl *mqtt.Client, topic string, write bool) bool {
 		return false
 	}
 	return true
+}
+
+// namesUnknownContract reports whether a subscribe filter names a contract this
+// node does not define: a retired one such as _TimeSync, or a misspelt one. The
+// engine answers from the contracts in force, the same answer a publish gets. No
+// grant covers such a filter, on any door.
+func (h *colcaHook) namesUnknownContract(filter string) bool {
+	contract, named := uns.FilterContract(filter)
+	if !named {
+		return false
+	}
+	if eng := h.engine(); eng != nil {
+		return !uns.IsKnown(eng.ClassOf(contract))
+	}
+	return !uns.IsKnown(uns.ClassOf(contract))
 }
 
 func (h *colcaHook) entryForClient(cl *mqtt.Client) *uns.Entry {
@@ -468,12 +506,14 @@ func (h *colcaHook) OnPublish(cl *mqtt.Client, pk packets.Packet) (packets.Packe
 		h.log.Debug("human ingest", "sub", s.sub, "topic", res.Topic, "stream", res.Stream, "offset", res.Offset)
 		return pk, packets.CodeSuccessIgnore
 	}
+	retires := h.retiresOwnRecord(eng, ident, pk)
 	res, err := eng.IngestClient(ident, pk.TopicName, pk.Payload)
 	if err != nil {
 		h.refusals.Warn("publish rejected", "identity", ident, "topic", pk.TopicName,
 			"bytes", len(pk.Payload), "err", err)
 		return pk, rejectCode(cl, pk, err)
 	}
+	h.noteServiceRecord(cl, pk, retires)
 	if res.Duplicate || res.Answered || res.Withheld != "" {
 		// Nothing stored, nothing to fan out: a repeat, a command the node
 		// answered itself, or a _Log record the log gate collapsed or capped. The
@@ -494,6 +534,15 @@ func (h *colcaHook) OnPublish(cl *mqtt.Client, pk packets.Packet) (packets.Packe
 // fetchLogs ack: that reaches only its sender and holders of the admin command
 // class over the target (uns.MayReadFetchLogsAck).
 func (h *colcaHook) OnSelectSubscribers(subs *mqtt.Subscribers, pk packets.Packet) *mqtt.Subscribers {
+	subs = h.selectRecipients(subs, pk)
+	// Last, so a session is charged only for what it is still a subscriber of.
+	h.boundOfflineQueues(subs, pk)
+	h.boundUnacked(subs, pk)
+	return subs
+}
+
+// selectRecipients narrows an acknowledgement's subscribers to who may read it.
+func (h *colcaHook) selectRecipients(subs *mqtt.Subscribers, pk packets.Packet) *mqtt.Subscribers {
 	eng := h.engine()
 	if eng == nil {
 		return subs
@@ -595,7 +644,9 @@ func New(cfg *config.Config, id *identity.Identity, reg *registry.Manager, ver *
 	s.Options.Capabilities.SharedSubAvailable = 0
 	hook := &colcaHook{eng: eng, reg: reg, ver: ver, humans: newHumanSessions(),
 		cfg: cfg, log: slog.Default().With("node", cfg.ULID, "comp", "mqtt"), metrics: m, broker: s,
+		offline:  newOfflineSessions(cfg.MQTTLimits),
 		refusals: slog.New(newMochiLogHandler(slog.Default().Handler())).With("node", cfg.ULID, "comp", "mqtt")}
+	hook.unacked = newUnackedClients(hook.offline)
 	if err := s.AddHook(hook, nil); err != nil {
 		return nil, err
 	}
@@ -632,11 +683,9 @@ func New(cfg *config.Config, id *identity.Identity, reg *registry.Manager, ver *
 		}
 		srv.humanWS = w
 	}
-	if srv.humanTCP != nil || srv.humanWS != nil {
-		go srv.runSweeper(srv.sweepStop)
-		if ver != nil {
-			ver.OnLogout(srv.endLoggedOutSessions)
-		}
+	go srv.runSweeper(srv.sweepStop)
+	if (srv.humanTCP != nil || srv.humanWS != nil) && ver != nil {
+		ver.OnLogout(srv.endLoggedOutSessions)
 	}
 	return srv, nil
 }
@@ -745,6 +794,12 @@ func (s *Server) Close() error {
 // appended record reaches the bus this way under its stored topic; state is
 // retained so new subscribers get the current value.
 func (s *Server) DeliverLocal(topic string, payload []byte, retain bool) {
+	if !uns.OnBusTopic(topic) {
+		// A service's private state has one reader, who reads it over HTTP
+		// where each record is authorized; a subscription filter cannot
+		// tell whose it is (uns.ServiceStateContract).
+		return
+	}
 	if len(topic) > uns.MaxTopicBytes {
 		// A record stored before Parse refused such topics; delivered, it would
 		// misframe the stream of every subscriber.

@@ -1,8 +1,8 @@
 """Ordinal enums for the platform machine-state contract.
 
 The integers behind the ``MachineState`` data model
-(``data_models/machinestate.yaml``). Its ``enum`` slot values match these
-``IntEnum``s name for name and index for index; ``test_machine_state.py``
+(``data_models/machinestate.yaml``). Its slots' ``value_definitions`` match
+these ``IntEnum``s value for value and name for name; ``test_machine_state.py``
 checks that.
 
 They are ints rather than strings because the state is stored as a number,

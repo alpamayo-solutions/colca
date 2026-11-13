@@ -1,0 +1,24 @@
+{
+  "base": {
+    "id": "01JREFERENCE0000000000000A",
+    "source_entity": "SystemElement",
+    "source_object_id": "01JELEMENT000000000000000A",
+    "relationship_type": "access:equipment",
+    "external_system_id": "01JEXTERNAL00000000000000A",
+    "external_table": "equipment",
+    "external_column": "id",
+    "external_row_id": "4711",
+    "description": "press 1"
+  },
+  "cases": [
+    {"name": "another record id", "change": {"id": "01JREFERENCE0000000000000B"}, "same": true},
+    {"name": "another key column", "change": {"external_column": "equipment_id"}, "same": true},
+    {"name": "another description", "change": {"description": "press one"}, "same": true},
+    {"name": "another kind of source", "change": {"source_entity": "Signal"}, "same": false},
+    {"name": "another source object", "change": {"source_object_id": "01JELEMENT000000000000000B"}, "same": false},
+    {"name": "another relationship", "change": {"relationship_type": "access:location"}, "same": false},
+    {"name": "another external system", "change": {"external_system_id": "01JEXTERNAL00000000000000B"}, "same": false},
+    {"name": "another table", "change": {"external_table": "locations"}, "same": false},
+    {"name": "another row", "change": {"external_row_id": "4712"}, "same": false}
+  ]
+}

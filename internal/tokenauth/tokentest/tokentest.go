@@ -35,6 +35,10 @@ type MintOpts struct {
 	Name     string   // name: the person's full name
 	Groups   []string // groups claim: the group ids a node resolves against its _Group definitions
 	Sid      string   // the identity provider's session id
+	Email    string   // email: the holder's address
+	// EmailVerified is the email_verified claim as given (nil: absent), so a
+	// test can send the boolean Keycloak emits or a look-alike.
+	EmailVerified any
 }
 
 type Issuer struct {
@@ -150,6 +154,12 @@ func (i *Issuer) MintOpt(o MintOpts) string {
 	}
 	if o.Sid != "" {
 		claims["sid"] = o.Sid
+	}
+	if o.Email != "" {
+		claims["email"] = o.Email
+	}
+	if o.EmailVerified != nil {
+		claims["email_verified"] = o.EmailVerified
 	}
 
 	switch o.Alg {

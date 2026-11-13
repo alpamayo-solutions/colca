@@ -77,11 +77,28 @@ type Attribution struct {
 	// record, so the node that executes a downlinked command knows the account
 	// from a person without reading its label.
 	ActorClient string
+	// ActorEmail is the person's address as their token vouched for it
+	// (email_verified), set only at a token door. Like ActorGroups it travels
+	// with the record, so the service applying a downlinked command -- an
+	// alarm subscription that mails the person -- has it where it executes.
+	ActorEmail string
+	// ActorClasses are the classes the admitting door witnessed a person
+	// holding at the command's place (uns.ClassesAt): what the service that
+	// applies the command may rely on without authorizing again, such as an
+	// administrator ending someone else's alarm subscription. Set only where
+	// the person's entry authorized the command, never from a request body;
+	// a node a command came down to keeps the value it was sent.
+	ActorClasses []string
 	// ActorGroups are the group ids a human's grants were resolved from at the
 	// verifying door. They travel with the record, so the node that executes a
 	// downlinked command can resolve the same person against its own _Group
 	// definitions.
 	ActorGroups []string
+	// ActorCredential is the personal access token a person signed in with at
+	// the admitting door, "<token id>:<hash-only digest>" (store.Record). The
+	// node a command comes down to resolves the person from its own definition
+	// of that token, as ActorGroups resolve against its own _Group definitions.
+	ActorCredential string
 	// Door is the door that admitted a command here and checked its sender's
 	// grants: doorClient or doorHuman. It is stored with the command so the grants
 	// can be checked again when the command is forwarded (ForwardRefusal).
@@ -105,8 +122,10 @@ func attributionForEntry(entry *uns.Entry) Attribution {
 	return Attribution{
 		WrittenBy: entry.ULID, ActorID: entry.ULID,
 		ActorLabel: label, ActorKind: entry.ActorKind(),
-		ActorClient: entry.ServiceClient,
-		ActorGroups: append([]string(nil), entry.Groups...),
+		ActorClient:     entry.ServiceClient,
+		ActorEmail:      entry.Email,
+		ActorGroups:     append([]string(nil), entry.Groups...),
+		ActorCredential: entry.Credential,
 	}
 }
 
@@ -121,7 +140,13 @@ func attributionForEntry(entry *uns.Entry) Attribution {
 // command that came down from the parent. Only then do their node-relative
 // ($node) grants resolve here; see uns.Entry.SignedInHere.
 func (e *Engine) actorForAttested(attribution Attribution, signedInHere bool) *uns.Entry {
-	if attribution.ActorKind != "human" || attribution.ActorID == "" || len(attribution.ActorGroups) == 0 {
+	if attribution.ActorKind != "human" || attribution.ActorID == "" {
+		return nil
+	}
+	if attribution.ActorCredential != "" {
+		return e.actorForCredential(attribution, signedInHere)
+	}
+	if len(attribution.ActorGroups) == 0 {
 		return nil
 	}
 	entry, problems, err := uns.TokenEntryWithGroups(attribution.ActorID, nil, attribution.ActorGroups, e.Groups())
@@ -144,6 +169,32 @@ func (e *Engine) actorForAttested(attribution Attribution, signedInHere bool) *u
 	entry.SignedInHere = signedInHere
 	return entry
 }
+
+// actorForCredential reconstitutes a person who signed in with a personal
+// access token from this node's own definition of that token
+// (uns.PersonalAccessTokenIndex.Attested): a token revoked, expired or changed
+// here, or one this node holds no definition of, gives no actor, and the
+// executor refuses the command. The person is never wider than the token.
+func (e *Engine) actorForCredential(attribution Attribution, signedInHere bool) *uns.Entry {
+	pats := e.pats.Load()
+	if pats == nil {
+		e.log.Warn("attested actor: no personal access token index on this node", "actor", attribution.ActorID)
+		return nil
+	}
+	entry, err := pats.Attested(attribution.ActorCredential, attribution.ActorID, e.clk.Now())
+	if err != nil {
+		e.log.Warn("attested actor: personal access token does not hold here", "actor", attribution.ActorID, "err", err)
+		return nil
+	}
+	entry.DisplayName, entry.ServiceClient, entry.Email = attribution.ActorLabel, attribution.ActorClient, attribution.ActorEmail
+	entry.SignedInHere = signedInHere
+	return entry
+}
+
+// SetPersonalAccessTokens gives the engine the index of this node's personal
+// access token definitions, from which it rebuilds a person whose command was
+// admitted with one (actorForCredential).
+func (e *Engine) SetPersonalAccessTokens(idx *uns.PersonalAccessTokenIndex) { e.pats.Store(idx) }
 
 // Mounts resolves identities to registry entries (*registry.Manager). The engine
 // keeps no identity state of its own.
@@ -172,6 +223,9 @@ type Engine struct {
 	ids     Mounts
 	log     *slog.Logger
 	metrics *metrics.Metrics // nil-safe: every method on a nil receiver is a no-op
+	// pats resolves a person whose command was admitted with a personal access
+	// token; nil until SetPersonalAccessTokens.
+	pats atomic.Pointer[uns.PersonalAccessTokenIndex]
 	// unknownGroups keeps an attested group this node does not define to one log line.
 	unknownGroups uns.GroupNotices
 	clk           *clock.Clock
@@ -186,9 +240,11 @@ type Engine struct {
 	replayMu    sync.Mutex
 	replayLocks map[string]*sync.Mutex
 
-	// bindMu holds the tag-binding check and the commit of a command batch
-	// that writes signals together, so two commands binding one tag at the
-	// same time cannot both pass (uns.CheckTagBindings).
+	// bindMu holds a one-holder check and the commit of the write it guards
+	// together, so two writes taking the same thing at the same time cannot
+	// both pass: a tag bound to one signal (uns.CheckTagBindings), a target
+	// named by one setpoint (uns.CheckSignalRelationships), and an external
+	// reference held by one record (uns.CheckExternalReferences).
 	bindMu sync.Mutex
 
 	// The node's position: the chain of elements from the root down to its own,
@@ -238,6 +294,8 @@ type Engine struct {
 	// auditID is injectable for deterministic event tests. Audit writes bypass
 	// the public ingest doors; see audit.go.
 	auditID func(time.Time) string
+	// auditRepeats counts the repeats of a denial instead of writing each.
+	auditRepeats auditRepeats
 
 	// unboundLog rate-limits the "_Metric with no _Signal" log line per path
 	// (unbound.go).
@@ -363,13 +421,20 @@ func (e *Engine) Now() time.Time { return e.clk.Now() }
 // ClockStatus is the /health clock block: the wall clock, the kernel's verdict
 // on it, and the skew to the parent. What is not known is null, never an
 // invented value: the host fields when the kernel's verdict cannot be read, the
-// parent fields on the root and before the first response from the parent.
+// host's estimate where its NTP service keeps none, the parent fields on the
+// root and before the first response from the parent.
 func (e *Engine) ClockStatus() map[string]any {
 	now := e.clk.Now()
-	host := map[string]any{"synchronized": nil, "estimated_error_ms": nil}
+	host := map[string]any{"synchronized": nil, "estimated_error_ms": nil, "max_error_ms": nil, "stale_bound_ms": nil}
 	if h := e.clk.Host(); h.Reported {
+		ms := func(d time.Duration) float64 { return float64(d) / float64(time.Millisecond) }
 		host["synchronized"] = h.Synchronized
-		host["estimated_error_ms"] = float64(h.EstimatedError) / float64(time.Millisecond)
+		// Null on a host whose NTP service keeps no estimate, see hostclock.Status.
+		if h.EstimateReported {
+			host["estimated_error_ms"] = ms(h.EstimatedError)
+		}
+		host["max_error_ms"] = ms(h.MaxError)
+		host["stale_bound_ms"] = ms(h.StaleBound())
 	}
 	status := map[string]any{
 		"wall_now_ms": now.UnixMilli(), "is_root": e.clk.IsRoot(), "host": host,
@@ -385,11 +450,21 @@ func (e *Engine) ClockStatus() map[string]any {
 }
 
 // ObserveParentClock records the skew between this node's clock and the
-// parent's now_ms from a replication response. It is a measurement for the
-// metrics and /health; no decision is corrected by it. It logs once when the
-// skew passes clock.SkewAlarm and once when it is back within it.
-func (e *Engine) ObserveParentClock(nowMS int64) {
-	skew, transition := e.clk.ObserveParent(nowMS)
+// parent's, from one replication response and the round trip that bounds it
+// (clock.ParentSample). It is a measurement for the metrics and /health; no
+// decision is corrected by it. A sample whose round trip is too long to say
+// anything is dropped. It logs once when the skew passes clock.SkewAlarm and
+// once when it is back within it.
+func (e *Engine) ObserveParentClock(s clock.ParentSample) {
+	skew, transition, used := e.clk.ObserveParent(s)
+	if !used {
+		if !e.clk.IsRoot() && s.NowMS > 0 {
+			e.metrics.ClockParentSampleDiscarded()
+			e.log.Debug("parent clock sample discarded: its round trip is too long to bound a skew",
+				"round_trip_ms", (s.Received.Sub(s.Sent) - s.Held).Milliseconds(), "max_ms", clock.MaxRoundTrip.Milliseconds())
+		}
+		return
+	}
 	switch transition {
 	case clock.Exceeded:
 		e.log.Warn("clock skew to the parent exceeds the alarm threshold: this node and its parent judge command expiry differently; check NTP on both hosts",
@@ -590,8 +665,12 @@ func (e *Engine) ingestClientAttributed(identity, topic string, payload []byte, 
 		actor := entry
 		if attested := e.actorForAttested(attribution, true); attested != nil {
 			actor = attested
+			// What the node witnessed the attested person holding here, never
+			// what the service's request said.
+			attribution.ActorClasses = uns.ClassesAt(e.Scope(), attested, p.Contract, p.Path)
 		}
-		implicitLocalConfigure := actor == entry && p.NodeID == e.cfg.ULID && entry.MayImplicitlyConfigure(p.Contract)
+		implicitLocalConfigure := actor == entry && p.NodeID == e.cfg.ULID &&
+			(entry.MayImplicitlyConfigure(p.Contract) || entry.MayImplicitlyDeliverAppNotification(p.Contract, p.Path))
 		if !implicitLocalConfigure && !uns.Authorize(e.Scope(), actor, uns.ActCmd, topic) {
 			e.refuseDeniedCommand(p, payload, attribution.ActorID)
 			return e.rejectDenied(metrics.ReasonCmdDenied, attribution, "execute", &p, "client %s: no cmd grant covers %s", identity, topic)
@@ -757,6 +836,7 @@ func (e *Engine) IngestHuman(entry *uns.Entry, topic string, payload []byte) (Re
 	}
 	attribution := attributionForEntry(entry)
 	attribution.Door = doorHuman
+	attribution.ActorClasses = uns.ClassesAt(e.Scope(), entry, p.Contract, p.Path)
 	// Forwarding checks the person again from the groups alone, so the door is
 	// recorded only when the groups alone authorize the command. Grants carried
 	// in the token itself cannot change during its life and are not checked again.
@@ -856,7 +936,7 @@ func (e *Engine) IngestAdminAttributed(topic string, payload []byte, attribution
 	} else if res, held := e.gateLog(class, p, topic, payload, attribution); held {
 		return res, nil
 	}
-	res, err := e.persistAttributed(class, p, topic, payload, attribution)
+	res, err := e.persistAdminRecord(class, p, topic, payload, attribution)
 	if err != nil {
 		e.ledger.forget(id)
 		return res, err
@@ -866,6 +946,21 @@ func (e *Engine) IngestAdminAttributed(topic string, payload []byte, attribution
 	}
 	res.Command = e.maybeExec(p, payload, attribution, nil) // the admin door presents a token, not an identity
 	return res, nil
+}
+
+// persistAdminRecord persists one admin publish. An external reference this
+// node authors is held to the rule a command's batch is held to: the record
+// is the same whichever door wrote it.
+func (e *Engine) persistAdminRecord(class uns.Class, p uns.Parsed, topic string, payload []byte, attribution Attribution) (Result, error) {
+	if p.Contract == "_ExternalReference" && p.NodeID == e.cfg.ULID {
+		e.bindMu.Lock()
+		defer e.bindMu.Unlock()
+		if err := e.checkExternalReferences([]uns.StateRecord{{Topic: topic, Payload: payload}}); err != nil {
+			e.metrics.RejectPublish(metrics.ReasonValidation)
+			return Result{}, err
+		}
+	}
+	return e.persistAttributed(class, p, topic, payload, attribution)
 }
 
 // ingestAdminStateBatch commits the complete state result of one domain command.
@@ -941,22 +1036,31 @@ func (e *Engine) ingestAdminStateBatch(records []uns.StateRecord, attribution At
 				Topic: input.Topic, Payload: input.Payload, TS: ts,
 				WrittenBy: attribution.WrittenBy, ActorID: attribution.ActorID,
 				ActorLabel: attribution.ActorLabel, ActorKind: attribution.ActorKind,
-				ActorGroups: attribution.ActorGroups, ActorClient: attribution.ActorClient,
+				ActorGroups: attribution.ActorGroups, ActorClient: attribution.ActorClient, ActorEmail: attribution.ActorEmail, ActorClasses: attribution.ActorClasses, ActorCredential: attribution.ActorCredential,
 				KVPath: parsed.Path, KVNode: parsed.NodeID, Delete: len(input.Payload) == 0,
 			},
 		})
 	}
 
 	storeRecords := make([]store.Record, len(prepared))
-	writesSignals := false
+	writesSignals, writesReferences := false, false
 	for i := range prepared {
 		storeRecords[i] = prepared[i].record
 		writesSignals = writesSignals || prepared[i].parsed.Contract == "_Signal"
+		writesReferences = writesReferences || prepared[i].parsed.Contract == "_ExternalReference"
 	}
-	if writesSignals {
+	if writesSignals || writesReferences {
 		e.bindMu.Lock()
 		defer e.bindMu.Unlock()
-		if err := e.checkTagBindings(records); err != nil {
+	}
+	if writesSignals {
+		if err := e.checkSignals(records); err != nil {
+			e.metrics.RejectPublish(metrics.ReasonValidation)
+			return nil, err
+		}
+	}
+	if writesReferences {
+		if err := e.checkExternalReferences(records); err != nil {
 			e.metrics.RejectPublish(metrics.ReasonValidation)
 			return nil, err
 		}
@@ -983,14 +1087,33 @@ func (e *Engine) ingestAdminStateBatch(records []uns.StateRecord, attribution At
 	return results, nil
 }
 
-// checkTagBindings refuses a batch that would bind a tag another of this
-// node's signals holds. The caller holds bindMu until the batch is appended.
-func (e *Engine) checkTagBindings(records []uns.StateRecord) error {
+// checkSignals refuses a batch that would write a signal whose value
+// definitions break a rule, bind a tag another of this node's signals holds,
+// or leave a signal with relationships that break a rule. The
+// caller holds bindMu until the batch is appended.
+func (e *Engine) checkSignals(records []uns.StateRecord) error {
 	current, err := e.scanContract("_Signal", func(kv store.KVEntry) bool { return kv.NodeID == e.cfg.ULID })
 	if err != nil {
-		return fmt.Errorf("tag binding check: %w", err)
+		return fmt.Errorf("signal check: %w", err)
 	}
-	return uns.CheckTagBindings(current, records)
+	if err := uns.CheckSignalValueDefinitions(records); err != nil {
+		return err
+	}
+	if err := uns.CheckTagBindings(current, records); err != nil {
+		return err
+	}
+	return uns.CheckSignalRelationships(current, records)
+}
+
+// checkExternalReferences refuses a write that would give this node a second
+// external reference with an identity one of its records already holds. The
+// caller holds bindMu until the write is appended.
+func (e *Engine) checkExternalReferences(records []uns.StateRecord) error {
+	current, err := e.scanContract("_ExternalReference", func(kv store.KVEntry) bool { return kv.NodeID == e.cfg.ULID })
+	if err != nil {
+		return fmt.Errorf("external reference check: %w", err)
+	}
+	return uns.CheckExternalReferences(current, records)
 }
 
 // ingestAdminEvent commits one append-only event a command executor authored,
@@ -1036,7 +1159,7 @@ func (e *Engine) ingestAdminEvent(record uns.StateRecord, attribution Attributio
 		Topic: record.Topic, Payload: record.Payload, TS: ts,
 		WrittenBy: attribution.WrittenBy, ActorID: attribution.ActorID,
 		ActorLabel: attribution.ActorLabel, ActorKind: attribution.ActorKind,
-		ActorGroups: attribution.ActorGroups, ActorClient: attribution.ActorClient,
+		ActorGroups: attribution.ActorGroups, ActorClient: attribution.ActorClient, ActorEmail: attribution.ActorEmail, ActorClasses: attribution.ActorClasses, ActorCredential: attribution.ActorCredential,
 		// Deliberately no KVPath/KVNode: this class is never state (IsState is
 		// false), so there is nothing to project and nothing to retract.
 	}
@@ -1141,6 +1264,105 @@ func (e *Engine) IngestDownlinkAttributed(topic string, payload []byte, ts int64
 	return res, err
 }
 
+// DownlinkCommand is one command the parent handed down, in local coordinates,
+// with the parent's timestamp and the authorship stamped at its origin.
+type DownlinkCommand struct {
+	Topic       string
+	Payload     []byte
+	TS          int64
+	Attribution Attribution
+}
+
+// ErrNotOnePage says a downlink page cannot be stored in one write: it holds a
+// record that is not a command. The caller stores it record by record.
+var ErrNotOnePage = errors.New("downlink page holds a record that is not a command")
+
+// IngestDownlinkPage stores the commands of one downlink page, and the downlink
+// cursor past the page, in a single write. Nothing is delivered or executed
+// before all of them are in the stream, so a consumer handed the first command
+// of a page finds the rest of the page behind it. Delivery and execution then
+// follow in the page's order.
+//
+// results has one entry per command: Persisted with its offset, or Err for a
+// command this node refuses (a *RejectError), which is left out of the write
+// like IngestDownlinkAttributed leaves it out. All are Duplicate when the
+// cursor already stood at or past at.To: the page was stored before.
+//
+// err is for the page as a whole and nothing was written: ErrNotOnePage, or a
+// store failure. A failure may be one record's (over max_record_bytes), so the
+// caller then stores the page record by record to hold the cursor at that one.
+func (e *Engine) IngestDownlinkPage(cmds []DownlinkCommand, at store.CursorAdvance) (results []PageResult, err error) {
+	results = make([]PageResult, len(cmds))
+	type accepted struct {
+		i     int
+		p     uns.Parsed
+		class uns.Class
+	}
+	var keep []accepted
+	var recs []store.Record
+	stream := ""
+	for i, c := range cmds {
+		p, perr := uns.Parse(c.Topic)
+		if perr != nil {
+			_, results[i].Err = e.reject(metrics.ReasonGrammar, "%w", perr)
+			continue
+		}
+		class := e.ClassOf(p.Contract)
+		if !uns.IsCommand(class) || (stream != "" && uns.StreamFor(class) != stream) {
+			return nil, ErrNotOnePage
+		}
+		stream = uns.StreamFor(class)
+		if e.ids.DrainingMount(p.Path) {
+			_, results[i].Err = e.reject(metrics.ReasonDraining,
+				"downlink: %s is draining, no new commands admitted", p.Path)
+			continue
+		}
+		keep = append(keep, accepted{i, p, class})
+		a := c.Attribution
+		recs = append(recs, store.Record{
+			Topic: c.Topic, Payload: c.Payload, TS: c.TS,
+			WrittenBy: a.WrittenBy, ActorID: a.ActorID, ActorLabel: a.ActorLabel, ActorKind: a.ActorKind,
+			ActorGroups: a.ActorGroups, ActorClient: a.ActorClient, ActorEmail: a.ActorEmail, ActorClasses: a.ActorClasses, ActorCredential: a.ActorCredential, Door: a.Door,
+		})
+	}
+	if len(recs) == 0 {
+		return results, nil
+	}
+	first, _, applied, err := e.store.AppendAdvancing(stream, recs, at)
+	if err != nil {
+		if errors.Is(err, store.ErrRecordTooLarge) {
+			return nil, err
+		}
+		return nil, &StorageError{Err: err}
+	}
+	if !applied {
+		e.log.Info("downlink page already stored: not stored, forwarded or executed again",
+			"cursor", at.Name, "position", at.To-1, "commands", len(recs))
+		for _, k := range keep {
+			results[k.i].Duplicate = true
+		}
+		return results, nil
+	}
+	for n, k := range keep {
+		results[k.i].Persisted, results[k.i].Offset = true, first+uint64(n)
+	}
+	for _, k := range keep {
+		c := cmds[k.i]
+		e.afterPersist(k.class, k.p, c.Topic, c.Payload, results[k.i].Offset, false)
+		// The target executes downlinked commands, as in IngestDownlinkAttributed.
+		e.maybeExec(k.p, c.Payload, c.Attribution, e.actorForAttested(c.Attribution, false))
+	}
+	return results, nil
+}
+
+// PageResult is what IngestDownlinkPage did with one command.
+type PageResult struct {
+	Persisted bool
+	Duplicate bool
+	Offset    uint64
+	Err       error
+}
+
 // IngestDownlinkDefinition applies a definition handed down by the parent. A
 // command is executed at its target; a definition is applied everywhere it
 // lands, so this persists, projects into KV and mirrors retained, and never calls
@@ -1208,7 +1430,7 @@ func (e *Engine) IngestReplicated(child, stream string, recs []store.ReplRecord)
 		// the mount-inserted path, so an ancestor can resolve grants naming it.
 		e.observeIndexes(p.Contract, r.Topic, r.Payload)
 		if e.deliver != nil {
-			bus = append(bus, busMsg{r.Topic, r.Payload, e.retainOnBus(p)})
+			bus = append(bus, busMsg{r.Topic, r.Payload, e.retainOnBus(p) && !r.Stale})
 		}
 	}
 	e.deliverReplicated(bus)
@@ -1271,7 +1493,7 @@ func retainFor(c uns.Class) bool { return uns.IsState(c) }
 // which reached this node through replication, is not retained unless
 // bus.retain_child_metrics says so (see config.Bus).
 func (e *Engine) retainOnBus(p uns.Parsed) bool {
-	if !retainFor(e.ClassOf(p.Contract)) {
+	if class := e.ClassOf(p.Contract); !retainFor(class) || !uns.OnBus(class) {
 		return false
 	}
 	return !e.childMetric(p)
@@ -1319,7 +1541,7 @@ func (e *Engine) persistRecord(class uns.Class, p uns.Parsed, topic string, payl
 		Topic: topic, Payload: payload, TS: ts,
 		WrittenBy: attribution.WrittenBy, ActorID: attribution.ActorID,
 		ActorLabel: attribution.ActorLabel, ActorKind: attribution.ActorKind,
-		ActorGroups: attribution.ActorGroups, ActorClient: attribution.ActorClient, Door: attribution.Door,
+		ActorGroups: attribution.ActorGroups, ActorClient: attribution.ActorClient, ActorEmail: attribution.ActorEmail, ActorClasses: attribution.ActorClasses, ActorCredential: attribution.ActorCredential, Door: attribution.Door,
 	}
 	if uns.IsState(class) {
 		rec.KVPath, rec.KVNode = p.Path, p.NodeID
@@ -1328,18 +1550,19 @@ func (e *Engine) persistRecord(class uns.Class, p uns.Parsed, topic string, payl
 		// empty delivery below makes mochi clear the retained message.
 		rec.Delete = len(payload) == 0
 	}
+	recs := []store.Record{rec}
 	var first uint64
 	var err error
 	if at != nil {
 		var applied bool
-		first, _, applied, err = e.store.AppendAdvancing(streamName, []store.Record{rec}, *at)
+		first, _, applied, err = e.store.AppendAdvancing(streamName, recs, *at)
 		if err == nil && !applied {
 			e.log.Info("record already stored: not stored, forwarded or executed again",
 				"topic", topic, "cursor", at.Name, "position", at.To-1)
 			return Result{Duplicate: true}, nil
 		}
 	} else {
-		first, _, err = e.store.Append(streamName, []store.Record{rec})
+		first, _, err = e.store.Append(streamName, recs)
 	}
 	if err != nil {
 		if errors.Is(err, store.ErrRecordTooLarge) {
@@ -1348,8 +1571,18 @@ func (e *Engine) persistRecord(class uns.Class, p uns.Parsed, topic string, payl
 		}
 		return Result{}, &StorageError{Err: err}
 	}
+	e.afterPersist(class, p, topic, payload, first, recs[0].Stale)
+	return Result{Persisted: true, Stream: streamName, Offset: first, Topic: topic}, nil
+}
+
+// afterPersist is what follows a record's durable write at offset: the
+// counters, the indexes and the local delivery. A stale record (store.Record.Stale)
+// reaches the bus without the retained flag, so the retained message stays the
+// current value.
+func (e *Engine) afterPersist(class uns.Class, p uns.Parsed, topic string, payload []byte, offset uint64, stale bool) {
+	streamName := uns.StreamFor(class)
 	e.metrics.IngestRecord(streamName)
-	e.log.Debug("ingest", "stream", streamName, "offset", first, "topic", topic)
+	e.log.Debug("ingest", "stream", streamName, "offset", offset, "topic", topic)
 	if uns.IsAck(class) {
 		// A 202 progress ack is not the answer a repeated command gets.
 		if id := correlationID(payload); id != "" && !isProgressAck(payload) {
@@ -1358,8 +1591,14 @@ func (e *Engine) persistRecord(class uns.Class, p uns.Parsed, topic string, payl
 	}
 	// The element index tracks every persisted record, not just machine publishes:
 	// an element authored through IngestAdmin must be visible too. The plugin
-	// observer, by contrast, only sees what machines published.
+	// observer, by contrast, sees what machines published, plus the definitions
+	// that reach this node (from the parent, or authored through the admin
+	// door): state bound before a definition arrived may resolve against it.
+	// Machines cannot author definitions, so no record is observed twice.
 	e.observeIndexes(p.Contract, topic, payload)
+	if uns.IsDefinition(class) {
+		e.observe(p, topic, payload)
+	}
 	// Routability is a question about the tree, not the local bus, so it is asked
 	// even on a node without a broker.
 	if uns.IsCommand(class) {
@@ -1370,10 +1609,9 @@ func (e *Engine) persistRecord(class uns.Class, p uns.Parsed, topic string, payl
 		// publishing it and recording its delivery are one decision. Everything else goes
 		// straight to the bus.
 		if uns.IsCommand(class) {
-			e.deliverCommand(class, p, topic, payload, first)
+			e.deliverCommand(class, p, topic, payload, offset)
 		} else {
-			e.deliver(topic, payload, retainFor(class))
+			e.deliver(topic, payload, retainFor(class) && !stale)
 		}
 	}
-	return Result{Persisted: true, Stream: streamName, Offset: first, Topic: topic}, nil
 }

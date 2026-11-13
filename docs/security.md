@@ -95,6 +95,23 @@ endorsement key, which identifies the chip, without a node config.
 | local | creates its own entry on first use of a local door, by name | read and write its element's subtree, or the whole node when unplaced |
 | human | OIDC token; grants come from the groups the token names | nothing without grants; never writes data, only commands |
 
+Commands need a `cmd` grant, with two rights implied by placement for an
+**unplaced** local service, both on its own node only:
+
+| Command | Who, without a grant |
+|---|---|
+| `_CmdConfigure` | any unplaced local service |
+| `_CmdOperate` to `{notification-id}/notify` (an app's notification for the node's notifications service) | the unplaced local service named `api`, or `hub-api` on a node that aggregates others (`uns.AppNotificationSenders`) |
+
+The second lets the platform api hand over an app's notification once it has
+checked the app's own capability role; the node's notifications service
+accepts and delivers it. Every other `_CmdOperate` -- an alarm's acknowledge,
+silence, unsilence, a channel's test message -- stays a person's act,
+authorized against their `operate` grant at its place.
+Another local service, a placed one, an external service or a person gets
+nothing from it. The local door authenticates by reaching it, so the name is
+the same trust every unplaced local service already holds for configure.
+
 An identity is bound to a **system element**, not to a path. Renaming or
 moving the element moves everything bound to it.
 
@@ -206,23 +223,34 @@ Grants use one grammar for machines and people:
 | `cmd:<element>/#:<classes>` | send commands of the listed classes below the element |
 | `admin:#` | use the administrative routes; does not widen reads or commands |
 
-Command classes are `acknowledge`, `param`, `operate`, `maintain`, `configure`
-and `admin`. `configure` is separate on purpose: someone who may rename a signal
+Command classes are `acknowledge`, `annotate`, `param`, `operate`, `maintain`,
+`configure` and `admin`. `configure` is separate on purpose: someone who may rename a signal
 must not thereby be able to send maintenance commands to a PLC. `acknowledge`
 is separate for the opposite reason: quitting an alarm moves nothing, so
 everyone who watches a line may hold it, and holding it must not let them start
 or stop the line. It covers `_CmdAcknowledge` and nothing else; silencing an
-alarm keeps notifications from other people and stays `operate`. No class
-implies another: someone who may both operate and acknowledge holds both.
+alarm keeps notifications from other people and stays `operate`. `annotate` is
+separate for the same reason: an annotation is an event about the plant, so a
+shift lead may correct or remove a colleague's entry without being able to
+configure the model or move equipment. No class implies another: someone who
+may both operate and acknowledge holds both.
+
+One command needs no class: subscribing to an alarm (`_CmdOperate`
+`{alarm-path}/subscribe` and `/unsubscribe`) is authorized by `read` on the
+alarm's place, since asking to be told about an alarm is seeing it. A cmd
+grant does not replace that read. See [alarms.md](alarms.md#subscribing-to-an-alarm).
 
 `_CmdEdit` is a person's tool for the node's data model, and the door admits
-anyone holding `configure` on it. Two narrower classes are also admitted, each
-covering only the part of `_CmdEdit` that matches the hazard: `operate` covers
-creating an annotation, or editing one's own; `param` covers setting the value
+anyone holding `configure` on it. Three narrower classes are also admitted, each
+covering only the part of `_CmdEdit` that matches the hazard: `annotate` covers
+every annotation write -- creating one, and changing or removing anyone's,
+including its start and its signals; `operate` covers creating an annotation,
+or changing or removing one's own as long as its type, start and signals stay
+what the node derives its id from; `param` covers setting the value
 and metadata of an existing constant, through an `update` or a single-key
 `metadata` edit (see [concepts.md](concepts.md#writing-one-metadata-key)) — an
 operator input such as a station's sandoff or grit — never creating or deleting
-a constant, never its other attributes, and never a signal's binding. Both are
+a constant, never its other attributes, and never a signal's binding. All three are
 scoped by the grant's element exactly as `configure` is:
 `cmd:<element>/#:param` reaches only the constants under that element. The write itself is still made by the node —
 `_CmdEdit` never lets a person publish state directly — but it carries the
@@ -236,6 +264,13 @@ adding, changing and removing the references of the entities under that
 element, and deleting such an entity together with its references. A changed
 or removed reference also counts at the entity it belongs to now, so it cannot
 be moved away from an entity outside the grant.
+
+A node holds one record per reference: the entity, the relationship, the
+external system, the table and the row are its identity, and the record's id
+only addresses it. A write that would add a second record for an identity the
+node already holds is refused with `409 duplicate_external_reference`, naming
+the record that stands, whichever command or door wrote it. A node that held
+two such records before this rule keeps both until an edit removes one.
 
 `#` in place of an element means the whole node. A grant on an element the node
 has never heard of covers nothing, and a node that has never reached its parent
@@ -354,6 +389,17 @@ identity provider, grants live in the tree, and an edge cut off from its parent
 still knows what its people may do. `colca-grantsync` keeps a Keycloak realm and
 the tree's groups in step, if you use Keycloak.
 
+`colca-grantsync` runs a cycle when the tree tells it something changed: it
+holds a `/watch` scoped to `_SystemElement` and `_Group`, so a new or retired
+element and a group definition written elsewhere are handled within a second.
+Keycloak has no push, so a tool that edits permissions, groups or role
+membership there posts `POST /sync` to the service's `HTTP_ADDR` (default
+`:9090`) to apply the edit at once. `SYNC_INTERVAL_MS` (default 5 minutes) is
+only a safety interval for Keycloak edits nobody announced; a failed cycle is
+retried sooner, backing off from 5 s up to that interval. `POST /sync` only
+schedules an idempotent cycle and bursts are merged into one cycle a second,
+so keep the address on a network only trusted tools reach.
+
 A grant change applies to open sessions as soon as the `_Group` definition
 reaches the node, not at the next token renewal. REST reads resolve the groups on
 every request. A live MQTT or WebSocket session resolves its token's groups again
@@ -364,6 +410,15 @@ Group membership itself lives in the token, so adding or removing a person from 
 group at the identity provider applies when the token is renewed or ends. A
 personal access token carries its own grants rather than groups; its sessions
 keep the grants they authenticated with, so re-issue the token to change them.
+
+A command a person sends with a personal access token names the token (its id
+and hash-only digest, never the secret) instead of groups. The node the command
+comes down to authorizes the person again against its own replicated
+definition of that token: the same token, still defined there, not expired, and
+owned by the acting person. A token revoked or changed there makes the person
+nobody, and the command is refused. A token made for `mcp` is also accepted
+where a door asks for `api`; a token made for `api` alone is not accepted for
+`mcp`.
 
 ## Administration
 

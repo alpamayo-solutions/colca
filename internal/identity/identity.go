@@ -231,6 +231,20 @@ func (i *Identity) WriteSelfSignedCert(path, cn string) error {
 	return nil
 }
 
+// Fingerprint names a hex public key the way a log line or an audit record
+// names it: the short form of its SPKI fingerprint, the same one an enrollment
+// dialog shows, so a denied key can be matched to the request waiting for
+// approval. Input that is not a key is shortened as it stands.
+func Fingerprint(pubHex string) string {
+	if fp, err := pubkey.FingerprintHex(pubHex); err == nil {
+		return pubkey.Short(fp)
+	}
+	if len(pubHex) <= 16 {
+		return pubHex
+	}
+	return pubHex[:16]
+}
+
 // PeerPubHex returns the public key of a peer's leaf certificate as SPKI hex,
 // for pinning. Only ed25519 and ECDSA P-256 keys are accepted.
 func PeerPubHex(rawCert []byte) (string, error) {

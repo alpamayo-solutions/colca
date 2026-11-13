@@ -193,7 +193,7 @@ func (h *colcaHook) authenticateHuman(cl *mqtt.Client, pk packets.Packet) bool {
 func sessionFor(cl *mqtt.Client, v *tokenauth.Verified, gen uint64) humanSession {
 	s := humanSession{
 		client: cl, entry: v.Entry, sub: v.Sub, exp: v.Exp,
-		holder:     tokenauth.Holder{DisplayName: v.Entry.DisplayName, ServiceClient: v.Entry.ServiceClient},
+		holder:     tokenauth.Holder{DisplayName: v.Entry.DisplayName, ServiceClient: v.Entry.ServiceClient, Email: v.Entry.Email},
 		credential: v.Credential, credentialID: v.CredentialID,
 		credentialDigest: v.CredentialDigest,
 		sid:              v.SessionID, issuedAt: v.IssuedAt,
@@ -243,7 +243,7 @@ func (h *colcaHook) humanACL(cl *mqtt.Client, topic string) bool {
 	if !ok || time.Now().After(s.exp) {
 		return false
 	}
-	if !uns.Authorize(h.scope(), s.entry, uns.ActSub, topic) {
+	if h.namesUnknownContract(topic) || !uns.Authorize(h.scope(), s.entry, uns.ActSub, topic) {
 		h.log.Warn("human subscribe/read denied", "sub", s.sub, "filter", topic)
 		h.metrics.ACLDeny(metrics.ACLSub)
 		path, _ := uns.SubscriptionPath(topic)
@@ -254,10 +254,21 @@ func (h *colcaHook) humanACL(cl *mqtt.Client, topic string) bool {
 	return true
 }
 
-// OnDisconnect drops the session table entry (nil-op for machine clients).
-func (h *colcaHook) OnDisconnect(cl *mqtt.Client, _ error, _ bool) {
+// OnDisconnect drops the session table entry (nil-op for machine clients), and
+// starts the account of a session that stays behind without its client. expire
+// says the session ends with the connection; a connection replaced by a newer
+// one of the same client id leaves the session to that one.
+func (h *colcaHook) OnDisconnect(cl *mqtt.Client, _ error, expire bool) {
 	if isHumanListener(cl) {
 		h.metrics.SetHumanSessions(h.humans.drop(cl.ID, cl))
+	}
+	h.forgetUnacked(cl)
+	if _, retired := h.retiring.LoadAndDelete(cl); retired && !cl.IsTakenOver() {
+		h.endRetired(cl, expire)
+		return
+	}
+	if !expire && !cl.IsTakenOver() {
+		h.wentOffline(cl)
 	}
 }
 
@@ -316,6 +327,8 @@ func (s *Server) runSweeper(stop <-chan struct{}) {
 			return
 		case <-t.C:
 			s.sweepInvalidHumanSessions(time.Now())
+			s.sweepOfflineSessions()
+			s.sweepUnackedClients(time.Now())
 		}
 	}
 }

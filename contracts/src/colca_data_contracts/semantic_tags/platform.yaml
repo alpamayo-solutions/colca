@@ -94,3 +94,10 @@ tags:
   - {name: serial-number, i18n_name: Serial number, applies_to: [constant], icon: tag, data_type: string}
   - {name: manufacturer, i18n_name: Manufacturer, applies_to: [constant], icon: factory, data_type: string}
   - {name: installation-date, i18n_name: Installation date, applies_to: [constant], icon: event, data_type: datetime}
+
+  # -- Constants only. Terms of an energy supply (the EnergySupply model):
+  #    prices, charges and factors a consumer's energy is valued with.
+  - {name: energy-price, i18n_name: Energy price, applies_to: [constant], icon: euro, quantity_kind: energy-price, data_type: number}
+  - {name: demand-charge, i18n_name: Demand charge, applies_to: [constant], icon: price_change, quantity_kind: demand-charge, data_type: number}
+  - {name: emission-factor, i18n_name: Emission factor, applies_to: [constant], icon: co2, quantity_kind: emission-factor, data_type: number}
+  - {name: grid-capacity, i18n_name: Grid capacity, applies_to: [constant], icon: power_input, quantity_kind: power, data_type: number}

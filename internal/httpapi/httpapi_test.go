@@ -12,6 +12,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -19,6 +20,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/alpamayo-solutions/colca/door"
 	"github.com/alpamayo-solutions/colca/internal/authtest"
 	"github.com/alpamayo-solutions/colca/internal/blobstore"
 	"github.com/alpamayo-solutions/colca/internal/config"
@@ -337,6 +339,48 @@ func TestFetchWithASignalFilterReachesASparseMatchInOnePage(t *testing.T) {
 	records := out["records"].([]any)
 	if len(records) != 1 || records[0].(map[string]any)["offset"] != float64(skipped+1) || out["next"] != float64(skipped+2) {
 		t.Fatalf("first page = %v, want the match at offset %d and next %d", out, skipped+1, skipped+2)
+	}
+}
+
+// An empty page the scan budget cut short says so: more is true and head lies
+// past next, so the consumer reads on at once. A caught-up page says more=false
+// with next at the head, on the plain path and the signal index path alike.
+func TestFetchTellsABudgetCutPageFromACaughtUpOne(t *testing.T) {
+	a := newAPI(t)
+	skipped := fetchScanBudget + 100
+	recs := make([]store.Record, 0, skipped)
+	for i := 0; i < skipped; i++ {
+		recs = append(recs, store.Record{Topic: "colca/v1/_Metric/n-test/line1/other", Payload: []byte(`{"signal_id":"other","value":1}`), TS: int64(i)})
+	}
+	if _, _, err := a.st.Append("metrics", recs); err != nil {
+		t.Fatal(err)
+	}
+	head := float64(skipped + 1)
+
+	resp, out := req(t, client(nil), "GET", a.url+"/fetch?stream=metrics&cursor=cut&max=10&topic="+
+		url.QueryEscape("colca/v1/_Metric/n-test/line1/wanted"), "tok", nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("fetch = %d: %v", resp.StatusCode, out)
+	}
+	if len(out["records"].([]any)) != 0 || out["next"] != float64(fetchScanBudget+1) || out["head"] != head || out["more"] != true {
+		t.Fatalf("budget-cut page = next %v head %v more %v, want empty, next %d, head %v, more true",
+			out["next"], out["head"], out["more"], fetchScanBudget+1, head)
+	}
+
+	resp, out = req(t, client(nil), "GET", a.url+"/fetch?stream=metrics&cursor=cut&max=10&from="+
+		fmt.Sprint(fetchScanBudget+1)+"&topic="+url.QueryEscape("colca/v1/_Metric/n-test/line1/wanted"), "tok", nil)
+	if resp.StatusCode != http.StatusOK || out["next"] != head || out["head"] != head || out["more"] != false {
+		t.Fatalf("caught-up page = %d next %v head %v more %v, want next = head = %v, more false",
+			resp.StatusCode, out["next"], out["head"], out["more"], head)
+	}
+
+	resp, out = req(t, client(nil), "GET", a.url+"/fetch?stream=metrics&cursor=sig&max=10&signal_id=absent", "tok", nil)
+	if resp.StatusCode != http.StatusOK || out["next"] != head || out["head"] != head || out["more"] != false {
+		t.Fatalf("signal page = %d next %v head %v more %v, want caught up", resp.StatusCode, out["next"], out["head"], out["more"])
+	}
+	resp, out = req(t, client(nil), "GET", a.url+"/fetch?stream=metrics&cursor=sig2&max=5&signal_id=other", "tok", nil)
+	if resp.StatusCode != http.StatusOK || len(out["records"].([]any)) != 5 || out["more"] != true {
+		t.Fatalf("limited signal page = %d records %d more %v, want 5 and more true", resp.StatusCode, len(out["records"].([]any)), out["more"])
 	}
 }
 
@@ -749,7 +793,7 @@ func TestFetchGapExactWireShape(t *testing.T) {
 	}
 	body = withoutStore(body)
 	want := `{"from":2,"gap":{"stream":"metrics","from_offset":2,"to_offset":3,"first_ts":1000,"last_ts":3000,"approx":false},` +
-		`"next":6,"records":[` + surviving + `]}` + "\n"
+		`"head":6,"more":false,"next":6,"records":[` + surviving + `]}` + "\n"
 	if body != want {
 		t.Fatalf("fetch gap wire shape:\n got %s\nwant %s", body, want)
 	}
@@ -766,7 +810,7 @@ func TestFetchGapExactWireShape(t *testing.T) {
 	// added after retention ran missed nothing it was promised.
 	_, body = raw(t, admin, "GET", a.url+"/fetch?stream=metrics&cursor=fresh", "tok", "")
 	body = withoutStore(body)
-	want = `{"from":4,"next":6,"records":[` + surviving + `]}` + "\n"
+	want = `{"from":4,"head":6,"more":false,"next":6,"records":[` + surviving + `]}` + "\n"
 	if body != want {
 		t.Fatalf("fresh cursor must start at the LWM without a gap:\n got %s\nwant %s", body, want)
 	}
@@ -776,7 +820,7 @@ func TestFetchGapExactWireShape(t *testing.T) {
 	_, body = raw(t, admin, "GET", a.url+"/fetch?stream=metrics&cursor=fresh&from=2", "tok", "")
 	body = withoutStore(body)
 	want = `{"from":2,"gap":{"stream":"metrics","from_offset":2,"to_offset":3,"first_ts":1000,"last_ts":3000,"approx":false},` +
-		`"next":6,"records":[` + surviving + `]}` + "\n"
+		`"head":6,"more":false,"next":6,"records":[` + surviving + `]}` + "\n"
 	if body != want {
 		t.Fatalf("fresh cursor read-ahead below the LWM must see the gap:\n got %s\nwant %s", body, want)
 	}
@@ -789,7 +833,7 @@ func TestFetchGapExactWireShape(t *testing.T) {
 	}
 	_, body = raw(t, admin, "GET", a.url+"/fetch?stream=metrics&cursor=lag", "tok", "")
 	body = withoutStore(body)
-	want = `{"from":5,"next":6,"records":[{"actor_id":"","actor_kind":"","actor_label":"","offset":5,"origin_offset":5,"payload":{"v":5},"topic":"` + topic + `","ts":5000,"written_by":""}]}` + "\n"
+	want = `{"from":5,"head":6,"more":false,"next":6,"records":[{"actor_id":"","actor_kind":"","actor_label":"","offset":5,"origin_offset":5,"payload":{"v":5},"topic":"` + topic + `","ts":5000,"written_by":""}]}` + "\n"
 	if body != want {
 		t.Fatalf("after ack past LWM the gap object must disappear:\n got %s\nwant %s", body, want)
 	}
@@ -1313,7 +1357,56 @@ func TestRequestLimitReturns429RetryAfterAndMetric(t *testing.T) {
 	if result.Code != http.StatusTooManyRequests || result.Header().Get("Retry-After") != "1" {
 		t.Fatalf("limited response = %d Retry-After=%q, want 429/1", result.Code, result.Header().Get("Retry-After"))
 	}
-	line := `colca_http_request_limited_total{class="scan",door="http"}`
+	line := `colca_http_request_limited_total{class="scan",door="http",reason="rate_limit"}`
+	if got := metricstest.Value(t, m, line); got != 1 {
+		t.Fatalf("%s = %v, want 1", line, got)
+	}
+}
+
+// A caller at its /watch concurrency cap is not told to retry in a second: no
+// slot frees by waiting, only by closing one of its watches. The body names the
+// bound, so a client can tell it from a rate refusal.
+func TestAConcurrencyRefusalNamesTheCapAndCarriesNoRetryAfter(t *testing.T) {
+	st, err := store.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+	m := metrics.New(st, config.Retention{}, nil)
+	limiter := httplimit.New()
+	for i := 0; i < watchPolicy.PerCallerConcurrent; i++ {
+		release, ok := acquireRequest(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/watch", nil),
+			limiter, m, metrics.DoorHTTP, limitClassWatch, "caller-1", watchPolicy)
+		if !ok {
+			t.Fatalf("watch %d rejected below the cap", i)
+		}
+		t.Cleanup(release)
+	}
+	result := httptest.NewRecorder()
+	if _, ok := acquireRequest(result, httptest.NewRequest(http.MethodGet, "/watch", nil),
+		limiter, m, metrics.DoorHTTP, limitClassWatch, "caller-1", watchPolicy); ok {
+		t.Fatal("a watch beyond the per-caller cap was admitted")
+	}
+	if result.Code != http.StatusTooManyRequests {
+		t.Fatalf("status = %d, want 429", result.Code)
+	}
+	if v := result.Header().Get("Retry-After"); v != "" {
+		t.Fatalf("Retry-After = %q on a concurrency refusal, want none", v)
+	}
+	var body struct {
+		Code  string `json:"code"`
+		Class string `json:"class"`
+		Limit int    `json:"limit"`
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal(result.Body.Bytes(), &body); err != nil {
+		t.Fatalf("body %q: %v", result.Body.String(), err)
+	}
+	if body.Code != "concurrency_limit" || body.Class != "watch" || body.Limit != watchPolicy.PerCallerConcurrent || body.Error == "" {
+		t.Fatalf("body = %+v, want code concurrency_limit, class watch, limit %d", body, watchPolicy.PerCallerConcurrent)
+	}
+	// The metric tells a caller at its cap from one over its rate.
+	line := `colca_http_request_limited_total{class="watch",door="http",reason="concurrency_limit"}`
 	if got := metricstest.Value(t, m, line); got != 1 {
 		t.Fatalf("%s = %v, want 1", line, got)
 	}
@@ -2896,7 +2989,7 @@ func TestACursorLagFindingIsAcceptedAndRetiredThroughTheAdminDoor(t *testing.T) 
 			return err
 		}}
 	cursor := a.m1.ULID + "/ingest"
-	a.eng.CursorFilters().Remember(cursor, "metrics", nil) // its consumer fetched since start
+	a.eng.CursorFilters().Remember(cursor, "metrics", cursorwatch.Filter{}) // its consumer fetched since start
 	var last uint64
 	_, last, err = a.st.Append("metrics", []store.Record{{Topic: "colca/v1/_Metric/n-test/m1/s1", Payload: []byte(`{"signal_id":"s1","value":1}`), TS: 1000}})
 	if err != nil {
@@ -3470,5 +3563,278 @@ func TestALocalServiceNamingNoPersonLeavesTheLabelEmpty(t *testing.T) {
 	}
 	if label := labels["erp-bridge"]; label != "erp-bridge" {
 		t.Fatalf("service's label = %q, want its id", label)
+	}
+}
+
+// The node's own api sends a message through one of its channels under its own
+// identity (`uns.MayImplicitlyDeliverAppNotification`): no person, no operate
+// grant. The same act from any other local service, and any other
+// _CmdOperate from the api, is still refused at the door.
+func TestTheLocalAPIDeliversAnAppNotificationAndNothingElseRidesOnIt(t *testing.T) {
+	// `api` on a node, `hub-api` on a node that aggregates others.
+	for _, sender := range uns.AppNotificationSenders {
+		t.Run(sender, func(t *testing.T) { testLocalAPIDeliversAnAppNotification(t, sender) })
+	}
+}
+
+func testLocalAPIDeliversAnAppNotification(t *testing.T, sender string) {
+	h := newLocalHandler(t)
+	const notification = "01KR0APPNOTE00000000000001"
+	publish := func(service, topic string) *httptest.ResponseRecorder {
+		t.Helper()
+		body, _ := json.Marshal(map[string]any{"topic": topic, "payload": map[string]any{
+			"correlation_id": "msg-" + service + "-" + topic, "expires_at": 9999999999999,
+			"command": map[string]any{"email": map[string]any{"recipients": []string{"a@example.test"}, "subject": "s", "body": "b"}},
+		}})
+		req := httptest.NewRequest(http.MethodPost, "/publish", bytes.NewReader(body))
+		req.Header.Set("X-Colca-Service", service)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		return rec
+	}
+	message := "colca/v1/_CmdOperate/n-test/" + notification + "/notify"
+
+	if rec := publish(sender, message); rec.Code != http.StatusOK {
+		t.Fatalf("the api's app notification = %d: %s", rec.Code, rec.Body.String())
+	}
+	// The node's notifications service reads it as the api's act: it answers
+	// only a message that carries the identity the node witnessed.
+	api, _ := h.reg.ByName(sender)
+	fetch := httptest.NewRequest(http.MethodGet, "/fetch?stream=commands&cursor=c/notifications/app-notifications", nil)
+	fetch.Header.Set("X-Colca-Service", "notifications")
+	fetched := httptest.NewRecorder()
+	h.ServeHTTP(fetched, fetch)
+	var page struct {
+		Records []struct {
+			Topic     string `json:"topic"`
+			ActorID   string `json:"actor_id"`
+			ActorKind string `json:"actor_kind"`
+		} `json:"records"`
+	}
+	if err := json.NewDecoder(fetched.Body).Decode(&page); err != nil || len(page.Records) != 1 {
+		t.Fatalf("commands stream = %v (%v), want the one message", page.Records, err)
+	}
+	if got := page.Records[0]; got.Topic != message || got.ActorID != api.ULID || got.ActorKind != "service" {
+		t.Fatalf("message record = %+v, want the api %s as its actor", got, api.ULID)
+	}
+	if rec := publish("dataops", message); rec.Code != http.StatusForbidden {
+		t.Fatalf("another local service's app notification = %d, want 403: %s", rec.Code, rec.Body.String())
+	}
+	if rec := publish(sender, "colca/v1/_CmdOperate/n-test/press/"+notification+"/acknowledge"); rec.Code != http.StatusForbidden {
+		t.Fatalf("the api's alarm act under its own identity = %d, want 403: %s", rec.Code, rec.Body.String())
+	}
+	if rec := publish(sender, "colca/v1/_CmdOperate/n-test/"+notification+"/message"); rec.Code != http.StatusForbidden {
+		t.Fatalf("the api's channel test under its own identity = %d, want 403: %s", rec.Code, rec.Body.String())
+	}
+	if rec := publish(sender, "colca/v1/_CmdOperate/n-other/"+notification+"/notify"); rec.Code == http.StatusOK {
+		t.Fatalf("the api sent a message addressed to another node under its own identity: %s", rec.Body.String())
+	}
+}
+
+// Asking to be told about an alarm is seeing it: read on the alarm's place is
+// the whole authority for subscribe and unsubscribe, and no cmd grant stands in
+// for it. Every other act on the alarm still needs its class.
+func TestASubscriptionToAnAlarmNeedsReadNotAGrantToAct(t *testing.T) {
+	h, iss := newLocalHandlerWithVerifier(t)
+	publish := func(grants []string, action, correlation string) int {
+		t.Helper()
+		token := iss.MintOpt(tokentest.MintOpts{Sub: "kc-sub-" + correlation, Grants: grants, Name: "Anna Meier"})
+		rec := localPublish(t, h,
+			map[string]string{"Authorization": "Bearer " + token, "X-Colca-Service": "api"},
+			map[string]any{"topic": "colca/v1/_CmdOperate/n-test/line1/press3/01HALARM0000000000000000AA/" + action,
+				"payload": map[string]any{"correlation_id": correlation, "expires_at": 9999999999999}})
+		return rec.Code
+	}
+	reader := []string{"read:#"}
+	operator := []string{"cmd:#:operate"}
+	for _, action := range []string{"subscribe", "unsubscribe"} {
+		if code := publish(reader, action, "reader-"+action); code != http.StatusOK {
+			t.Fatalf("a reader's %s = %d, want 200: read on the alarm is the authority", action, code)
+		}
+		if code := publish(operator, action, "operator-"+action); code != http.StatusForbidden {
+			t.Fatalf("%s by a person with operate but no read = %d, want 403", action, code)
+		}
+		if code := publish(nil, action, "nobody-"+action); code != http.StatusForbidden {
+			t.Fatalf("%s by a person with no grant = %d, want 403", action, code)
+		}
+	}
+	for _, action := range []string{"silence", "acknowledge"} {
+		if code := publish(reader, action, "reader-"+action); code != http.StatusForbidden {
+			t.Fatalf("a reader's %s = %d, want 403: it still needs operate", action, code)
+		}
+		if code := publish(operator, action, "operator-"+action); code != http.StatusOK {
+			t.Fatalf("an operator's %s = %d, want 200", action, code)
+		}
+	}
+}
+
+// The person's address travels with their command only when the token vouches
+// for it: email_verified is the boolean true. The service that applies the
+// command reads it as actor_email on /fetch; nothing else can put one there.
+func TestACommandCarriesTheVerifiedEmailOnly(t *testing.T) {
+	h, iss := newLocalHandlerWithVerifier(t)
+	send := func(correlation string, opts tokentest.MintOpts, extra map[string]any) {
+		t.Helper()
+		headers := map[string]string{"X-Colca-Service": "api"}
+		if opts.Sub != "" {
+			opts.Grants = []string{"read:#"}
+			headers["Authorization"] = "Bearer " + iss.MintOpt(opts)
+		}
+		body := map[string]any{"topic": "colca/v1/_CmdOperate/n-test/line1/01HALARM0000000000000000AA/subscribe",
+			"payload": map[string]any{"correlation_id": correlation, "expires_at": 9999999999999}}
+		for k, v := range extra {
+			body[k] = v
+		}
+		if rec := localPublish(t, h, headers, body); rec.Code != http.StatusOK {
+			t.Fatalf("%s: publish = %d: %s", correlation, rec.Code, rec.Body.String())
+		}
+	}
+	send("verified", tokentest.MintOpts{Sub: "kc-anna", Email: "anna@plant.test", EmailVerified: true}, nil)
+	send("unverified", tokentest.MintOpts{Sub: "kc-bert", Email: "bert@plant.test", EmailVerified: false}, nil)
+	send("string-true", tokentest.MintOpts{Sub: "kc-cara", Email: "cara@plant.test", EmailVerified: "true"}, nil)
+	send("no-claim", tokentest.MintOpts{Sub: "kc-dora", Email: "dora@plant.test"}, nil)
+	// A service account is no person to mail, whatever its token says.
+	send("service-account", tokentest.MintOpts{Sub: "kc-erp", Username: "service-account-erp-bridge",
+		Email: "erp@plant.test", EmailVerified: true}, nil)
+	// A local service naming the person it acts for, without their token:
+	// the body has no way to claim an address for them.
+	send("attested", tokentest.MintOpts{}, map[string]any{
+		"actor_id": "kc-emil", "actor_kind": "human", "actor_email": "emil@plant.test"})
+
+	fetchReq := httptest.NewRequest(http.MethodGet, "/fetch?stream=commands&cursor="+uns.LocalCursorPrefix+"api/emails&max=50", nil)
+	fetchReq.Header.Set("X-Colca-Service", "api")
+	fetchRec := httptest.NewRecorder()
+	h.ServeHTTP(fetchRec, fetchReq)
+	if fetchRec.Code != http.StatusOK {
+		t.Fatalf("GET /fetch = %d: %s", fetchRec.Code, fetchRec.Body.String())
+	}
+	var page door.Page
+	if err := json.Unmarshal(fetchRec.Body.Bytes(), &page); err != nil {
+		t.Fatal(err)
+	}
+	emails := map[string]string{}
+	for _, rec := range page.Records {
+		var payload struct {
+			CorrelationID string `json:"correlation_id"`
+		}
+		if json.Unmarshal(rec.Payload, &payload) == nil && payload.CorrelationID != "" {
+			emails[payload.CorrelationID] = rec.ActorEmail
+		}
+	}
+	want := map[string]string{"verified": "anna@plant.test", "unverified": "", "string-true": "", "no-claim": "", "service-account": "", "attested": ""}
+	for correlation, email := range want {
+		got, found := emails[correlation]
+		if !found {
+			t.Fatalf("command %s not on the commands stream; fetched %v", correlation, emails)
+		}
+		if got != email {
+			t.Fatalf("command %s: actor_email = %q, want %q", correlation, got, email)
+		}
+	}
+}
+
+// The classes a person held at the command's place travel with it as the door
+// witnessed them; a local service's request cannot claim any for a person.
+func TestACommandCarriesTheClassesWitnessedAtItsPlace(t *testing.T) {
+	h, iss := newLocalHandlerWithVerifier(t)
+	topic := "colca/v1/_CmdOperate/n-test/line1/01HALARM0000000000000000AA/unsubscribe"
+	send := func(correlation string, headers map[string]string, extra map[string]any) {
+		t.Helper()
+		headers["X-Colca-Service"] = "api"
+		body := map[string]any{"topic": topic,
+			"payload": map[string]any{"correlation_id": correlation, "expires_at": 9999999999999}}
+		for k, v := range extra {
+			body[k] = v
+		}
+		if rec := localPublish(t, h, headers, body); rec.Code != http.StatusOK {
+			t.Fatalf("%s: publish = %d: %s", correlation, rec.Code, rec.Body.String())
+		}
+	}
+	bearer := func(sub string, grants ...string) map[string]string {
+		return map[string]string{"Authorization": "Bearer " + iss.MintOpt(tokentest.MintOpts{Sub: sub, Grants: grants})}
+	}
+	send("reader", bearer("kc-anna", "read:#"), nil)
+	send("admin", bearer("kc-bert", "read:#", "cmd:#:configure,admin"), nil)
+	send("claimed", map[string]string{}, map[string]any{
+		"actor_id": "kc-cara", "actor_kind": "human", "actor_classes": []string{"admin"}})
+
+	fetchReq := httptest.NewRequest(http.MethodGet, "/fetch?stream=commands&cursor="+uns.LocalCursorPrefix+"api/classes&max=50", nil)
+	fetchReq.Header.Set("X-Colca-Service", "api")
+	fetchRec := httptest.NewRecorder()
+	h.ServeHTTP(fetchRec, fetchReq)
+	if fetchRec.Code != http.StatusOK {
+		t.Fatalf("GET /fetch = %d: %s", fetchRec.Code, fetchRec.Body.String())
+	}
+	var page door.Page
+	if err := json.Unmarshal(fetchRec.Body.Bytes(), &page); err != nil {
+		t.Fatal(err)
+	}
+	classes := map[string]string{}
+	for _, rec := range page.Records {
+		var payload struct {
+			CorrelationID string `json:"correlation_id"`
+		}
+		if json.Unmarshal(rec.Payload, &payload) == nil && payload.CorrelationID != "" {
+			classes[payload.CorrelationID] = strings.Join(rec.ActorClasses, ",")
+		}
+	}
+	for correlation, want := range map[string]string{"reader": "read", "admin": "admin,configure,read", "claimed": ""} {
+		got, found := classes[correlation]
+		if !found {
+			t.Fatalf("command %s not on the commands stream; fetched %v", correlation, classes)
+		}
+		if got != want {
+			t.Fatalf("command %s: actor_classes = %q, want %q", correlation, got, want)
+		}
+	}
+}
+
+// A person whose read covers a command's place reads the command on /fetch,
+// but never what the door witnessed about its sender: a colleague's address
+// and classes reach only the node's own services, which apply commands.
+func TestFetchHandsTheWitnessToTheNodesServicesOnly(t *testing.T) {
+	h, iss := newLocalHandlerWithVerifier(t)
+	anna := iss.MintOpt(tokentest.MintOpts{Sub: "kc-anna", Grants: []string{"read:#"},
+		Email: "anna@plant.test", EmailVerified: true})
+	rec := localPublish(t, h, map[string]string{"Authorization": "Bearer " + anna, "X-Colca-Service": "api"},
+		map[string]any{"topic": "colca/v1/_CmdOperate/n-test/line1/01HALARM0000000000000000AA/subscribe",
+			"payload": map[string]any{"correlation_id": "c-witness", "expires_at": 9999999999999}})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("publish = %d: %s", rec.Code, rec.Body.String())
+	}
+	fetch := func(cursor string, headers map[string]string) door.Record {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodGet, "/fetch?stream=commands&cursor="+cursor+"&max=50", nil)
+		for k, v := range headers {
+			req.Header.Set(k, v)
+		}
+		out := httptest.NewRecorder()
+		h.ServeHTTP(out, req)
+		if out.Code != http.StatusOK {
+			t.Fatalf("GET /fetch (%s) = %d: %s", cursor, out.Code, out.Body.String())
+		}
+		var page door.Page
+		if err := json.Unmarshal(out.Body.Bytes(), &page); err != nil {
+			t.Fatal(err)
+		}
+		for _, r := range page.Records {
+			if strings.Contains(string(r.Payload), "c-witness") {
+				return r
+			}
+		}
+		t.Fatalf("the subscription is not on the page fetched with %s: %+v", cursor, page.Records)
+		return door.Record{}
+	}
+	service := fetch(uns.LocalCursorPrefix+"api/witness", map[string]string{"X-Colca-Service": "api"})
+	if service.ActorEmail != "anna@plant.test" || strings.Join(service.ActorClasses, ",") != "read" {
+		t.Fatalf("the node's service read %q %v, want the witnessed address and classes", service.ActorEmail, service.ActorClasses)
+	}
+	bert := iss.MintOpt(tokentest.MintOpts{Sub: "kc-bert", Grants: []string{"read:#"}})
+	person := fetch("kc-bert/witness", map[string]string{"Authorization": "Bearer " + bert, "X-Colca-Service": "api"})
+	if person.ActorID != "kc-anna" {
+		t.Fatalf("a reader read the command as sent by %q, want kc-anna", person.ActorID)
+	}
+	if person.ActorEmail != "" || len(person.ActorClasses) != 0 {
+		t.Fatalf("a reader of the command read the sender's witness: %q %v", person.ActorEmail, person.ActorClasses)
 	}
 }

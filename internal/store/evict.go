@@ -1,7 +1,6 @@
 package store
 
 import (
-	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -75,17 +74,19 @@ func (s *Store) EvictRecords(stream string, from, maxScan uint64, doomed func(to
 			break
 		}
 		scanned++
-		var e recEnc
-		if err := json.Unmarshal(iter.Value(), &e); err != nil {
+		// The topic and signal id are read without decoding the record (see
+		// peekRecord): the pass crosses every record of the stream from the LWM.
+		h, err := headOf(iter.Value())
+		if err != nil {
 			iter.Close()
 			return st, fmt.Errorf("decode record %q during eviction: %w", iter.Key(), err)
 		}
-		if !doomed(e.Topic) {
+		if !doomed(h.topic) {
 			continue
 		}
 		keys = append(keys, append([]byte(nil), iter.Key()...))
-		if e.SignalID != "" {
-			indexKeys = append(indexKeys, sigKey(stream, e.SignalID, off))
+		if h.signalID != "" {
+			indexKeys = append(indexKeys, sigKey(stream, h.signalID, off))
 		}
 		shed += uint64(len(iter.Key())) + uint64(len(iter.Value()))
 	}

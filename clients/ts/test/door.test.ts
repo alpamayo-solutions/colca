@@ -74,6 +74,21 @@ describe("fetch", () => {
     expect(new URL(calls[1].url).searchParams.getAll("contract")).toEqual(["_Annotation"]);
   });
 
+  it("tells a page cut short from a caught-up one", async () => {
+    const { fetch } = stub([
+      { body: { records: [], next: 20001, head: 30000, more: true } },
+      { body: { records: [], next: 30000, head: 30000, more: false } },
+    ]);
+    const door = new Door({ baseUrl: "http://colca", service: "my-app", fetch });
+
+    const cut = await door.fetchPage("metrics", "c/my-app/live", { topics: ["a/b"] });
+    expect(cut.more).toBe(true);
+    expect(cut.head).toBe(30000);
+    const done = await door.fetchPage("metrics", "c/my-app/live", { topics: ["a/b"] });
+    expect(done.more).toBe(false);
+    expect(done.next).toBe(done.head);
+  });
+
   it("carries a gap through", async () => {
     const { fetch } = stub([
       {

@@ -62,9 +62,9 @@ type CommandOutcome struct {
 // leaves every command it receives unexecuted and unacked.
 func (e *Engine) SetExecutor(x CommandExecutor) { e.exec = x }
 
-// RecordObserver is told about records this node persisted through its own
-// doors, so a domain plugin can react to state without the core knowing which
-// contracts are interesting. Observers run inline: they must be cheap, and
+// RecordObserver is told about records machines published through this node's
+// doors, and about every definition that reaches it, so a domain plugin can
+// react to state without the core knowing which contracts are interesting. Observers run inline: they must be cheap, and
 // anything they publish goes through the ordinary doors like everyone else.
 type RecordObserver interface {
 	Observe(contract, topic string, payload []byte)

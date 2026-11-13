@@ -204,3 +204,36 @@ func TestDoorAdmissionKeysEnrolledNodesByIdentity(t *testing.T) {
 		}
 	}
 }
+
+// A waiting poll reads on from where its last read ended: the commands it
+// crossed hold nothing for its child, so a wake does not read them again. Before,
+// each wake re-read from the child's position, so k siblings' commands arriving
+// one by one cost 1+2+...+k reads instead of k.
+func TestAWaitingDownlinkPollReadsEachCommandOnce(t *testing.T) {
+	srv, ps, clients, _ := fanoutParent(t, 2)
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	after, done := openPoll(ctx, t, clients[0])
+	waitFor(t, "the poll waiting at the parent", 5*time.Second, func() bool {
+		return goroutinesIn("(*Server).handleDownlink") == 1
+	})
+	const siblings = 5
+	for i := uint64(1); i <= siblings; i++ {
+		seedCommandFor(t, ps, "child2")
+		waitFor(t, "the poll read the sibling's command", 5*time.Second, func() bool {
+			return srv.downlinkWakes.Load() == int64(i) && srv.downlinkCrossed.Load() >= i //nolint:gosec // at most 5
+		})
+	}
+	seedCommandFor(t, ps, "child1")
+	select {
+	case res := <-done:
+		if res.err != nil || res.next != after+siblings+1 {
+			t.Fatalf("poll: next %d err %v, want %d", res.next, res.err, after+siblings+1)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the command did not answer the waiting poll")
+	}
+	if got := srv.downlinkCrossed.Load(); got != siblings+1 {
+		t.Fatalf("the poll read %d offsets for %d commands, want each once", got, siblings+1)
+	}
+}

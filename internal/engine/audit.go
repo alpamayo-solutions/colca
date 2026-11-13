@@ -23,6 +23,10 @@ type AuditDenial struct {
 	EntityType string
 	EntityID   string
 	Metadata   map[string]any
+	// Peer is the fingerprint of the key a caller showed that this node knows
+	// no identity for. It names the caller in the record, which would
+	// otherwise carry no actor at all.
+	Peer string
 }
 
 // SetAuditIDSource replaces event-id generation. It exists for deterministic
@@ -35,7 +39,24 @@ func newAuditID(now time.Time) string {
 
 // RecordDenial appends straight to the audit stream, bypassing the Ingest*
 // methods, so an audit failure cannot recurse through the path that denied.
-func (e *Engine) RecordDenial(d AuditDenial) error { return e.recordAuthorization(d, "denied") }
+//
+// A caller can repeat a refused request as fast as it likes, so a denial is
+// written once per caller and cause: its repeats are counted and reported in
+// one record per auditRepeatWindow (see auditRepeats).
+func (e *Engine) RecordDenial(d AuditDenial) error {
+	if d.Peer != "" {
+		if d.ActorID == "" && d.ActorLabel == "" {
+			d.ActorLabel = "unknown key " + d.Peer
+		}
+		d.Metadata = withAuditMetadata(d.Metadata, "peer", d.Peer)
+	}
+	write, repeated, since := e.auditRepeats.admit(d, e.Now())
+	if !write {
+		e.metrics.AuditDenialSuppressed(auditDoor(d), d.ReasonCode)
+		return nil
+	}
+	return e.recordAuthorization(repeatedDenial(d, repeated, since), "denied")
+}
 
 // RecordAuthorized records an authorization that succeeded only through a
 // right beyond ownership, such as an operator retiring another identity's
@@ -47,6 +68,15 @@ func (e *Engine) recordAuthorization(d AuditDenial, outcome string) error {
 	if d.ActorKind == "" {
 		d.ActorKind = "anonymous"
 	}
+	// This writer passes no door, so nothing else holds its record to the
+	// contract's limits. A denial repeats what the caller sent (the contract
+	// and path of a refused topic), which can be any length.
+	d.Operation = uns.BoundAuditField("operation", d.Operation)
+	d.ReasonCode = uns.BoundAuditField("reason_code", d.ReasonCode)
+	d.ActorID = uns.BoundAuditField("actor_id", d.ActorID)
+	d.ActorLabel = uns.BoundAuditField("actor_label", d.ActorLabel)
+	d.EntityType = uns.BoundAuditField("entity_type", d.EntityType)
+	d.EntityID = uns.BoundAuditField("entity_id", d.EntityID)
 	nowTime := e.Now()
 	eventID := e.auditID(nowTime)
 	now := nowTime.UnixMilli()
@@ -100,7 +130,8 @@ func (e *Engine) recordAuthorization(d AuditDenial, outcome string) error {
 var auditMetadataKey = map[string]bool{
 	"door": true, "route": true, "method": true, "stream": true,
 	"contract": true, "filter": true, "cursor": true, "topic": true,
-	"owner": true,
+	"owner": true, "limit": true, "peer": true,
+	"repeated": true, "repeated_since": true,
 	// Enrollment decisions: which key, where it lives, which node and element,
 	// which pre-approval admitted it, and the key it replaced.
 	"fingerprint": true, "key_store": true, "ek": true, "ulid": true,

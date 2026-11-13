@@ -279,6 +279,30 @@ func TestAcknowledgeAndOperateDoNotImplyEachOther(t *testing.T) {
 	}
 }
 
+// annotate is its own class. It admits a person to the Edit contract, where
+// the executor decides per position; it carries no other class and no other
+// class carries it.
+func TestAnnotateIsAGrantableClassThatImpliesNoOther(t *testing.T) {
+	const (
+		operateCmd   = "colca/v1/_CmdOperate/n1/werk1/cnc5/start"
+		configureCmd = "colca/v1/_CmdConfigure/n1/werk1/cnc5/upsert"
+	)
+	if _, err := ParseGrant(cmdAt("werk1", "annotate")); err != nil {
+		t.Fatalf("cmd:...:annotate rejected: %v", err)
+	}
+	ann := entry("", cmdAt("werk1", "annotate"))
+	if !ann.HoldsCmdClass("annotate") || ann.HoldsCmdClass("operate") || ann.HoldsCmdClass("configure") {
+		t.Error("an annotate grant must hold annotate and nothing else")
+	}
+	if Authorize(ns, ann, ActCmd, operateCmd) || Authorize(ns, ann, ActCmd, configureCmd) {
+		t.Error("an annotate grant must not admit operate or configure commands")
+	}
+	op := entry("", cmdAt("werk1", "operate"))
+	if op.HoldsCmdClass("annotate") {
+		t.Error("an operate grant must not carry annotate")
+	}
+}
+
 func TestConfigureIsAGrantableClass(t *testing.T) {
 	g, err := ParseGrant(cmdAt("werk1", "configure,param"))
 	if err != nil {
@@ -358,6 +382,30 @@ func TestAuthorizeBrowse(t *testing.T) {
 	for _, c := range cases {
 		if got := AuthorizeBrowse(ns, c.e, c.path); got != c.want {
 			t.Errorf("%s: AuthorizeBrowse(%q) = %v, want %v", c.name, c.path, got, c.want)
+		}
+	}
+}
+
+func TestFilterContractNamesTheLiteralThirdLevelOfAFilterUnderTheRoot(t *testing.T) {
+	named := map[string]string{
+		"colca/v1/_TimeSync/+":    "_TimeSync",
+		"colca/v1/_TimeSync/#":    "_TimeSync",
+		"colca/v1/_Metric/n1/a/b": "_Metric",
+		"+/v1/_TimeSync/n1/#":     "_TimeSync",
+		"colca/+/_Nope/#":         "_Nope",
+		"colca/v1/Metric":         "Metric",
+	}
+	for filter, want := range named {
+		if got, ok := FilterContract(filter); !ok || got != want {
+			t.Errorf("FilterContract(%q) = %q, %v, want %q, true", filter, got, ok, want)
+		}
+	}
+	for _, filter := range []string{
+		"#", "colca/#", "colca/v1", "colca/v1/#", "colca/v1/+/n1/#", "+/#",
+		"factory/raw/_TimeSync", // outside the root colca is a plain broker
+	} {
+		if got, ok := FilterContract(filter); ok {
+			t.Errorf("FilterContract(%q) = %q, true, want no contract named", filter, got)
 		}
 	}
 }
@@ -816,8 +864,10 @@ func TestAuthorizeSubRefusesTheReservedDollarSpace(t *testing.T) {
 		{"human: shared sub over its own zone", human, "$share/g/colca/v1/+/+/werk1/linie3/#", false},
 
 		{"machine: everything, unaliased, is denied by zone", zoned, "colca/#", false},
-		// The beacon filter of an older machine has no exception any more: it names
-		// no path, so only an identity that may read everything is granted it.
+		// The beacon filter of an older machine has no exception among the grants:
+		// it names no path, so only read:# covers it. The door refuses it before
+		// the grants are read, because it names a contract the node does not define
+		// (FilterContract).
 		{"machine: the retired time beacon filter is denied by zone", zoned, "colca/v1/_TimeSync/+", false},
 		{"machine: the retired time beacon filter, with read:#", readAll, "colca/v1/_TimeSync/+", true},
 		{"machine: own zone, unaliased, is granted", zoned, "colca/v1/+/+/werk1/linie3/#", true},
@@ -828,5 +878,143 @@ func TestAuthorizeSubRefusesTheReservedDollarSpace(t *testing.T) {
 		if got := Authorize(ns, c.e, ActSub, c.filter); got != c.want {
 			t.Errorf("%s: Authorize(Sub, %q) = %v, want %v", c.name, c.filter, got, c.want)
 		}
+	}
+}
+
+func TestOnlyTheUnplacedLocalAPIDeliversAnAppNotificationWithoutAGrant(t *testing.T) {
+	const notification = "01KR0APPNOTE00000000000001"
+	api := &Entry{ULID: "svc-api", Kind: KindLocal, Name: "api"}
+	if !api.MayImplicitlyDeliverAppNotification("_CmdOperate", notification+"/notify") {
+		t.Fatal("the node's own api must deliver an app notification under its own identity")
+	}
+	// An aggregating node's api registers as `hub-api`: the same right.
+	hubAPI := &Entry{ULID: "svc-hub-api", Kind: KindLocal, Name: "hub-api"}
+	if !hubAPI.MayImplicitlyDeliverAppNotification("_CmdOperate", notification+"/notify") {
+		t.Fatal("an aggregating node's api must deliver an app notification under its own identity")
+	}
+	refused := map[string]*Entry{
+		"another local service": {ULID: "svc-dataops", Kind: KindLocal, Name: "dataops"},
+		"a name close to it":    {ULID: "svc-api-x", Kind: KindLocal, Name: "hub-api-x"},
+		"a placed api":          {ULID: "svc-api-2", Kind: KindLocal, Name: "api", Element: "01HLINE1"},
+		"a placed hub api":      {ULID: "svc-api-3", Kind: KindLocal, Name: "hub-api", Element: "01HLINE1"},
+		"an external service":   {ULID: "m1", Kind: KindExternal, Name: "hub-api"},
+		"a person":              {ULID: "sub-anna", Kind: KindHuman, Name: "api"},
+		"nobody":                nil,
+	}
+	for name, entry := range refused {
+		if entry.MayImplicitlyDeliverAppNotification("_CmdOperate", notification+"/notify") {
+			t.Errorf("%s gained the implicit app notification", name)
+		}
+	}
+	for _, path := range []string{
+		"press/" + notification + "/acknowledge", // an alarm act stays a person's
+		notification + "/message",                // a channel test stays an administrator's
+		"site1/" + notification + "/notify",      // a child's: not this node's
+		"/notify",
+		notification + "/notify/x",
+		"_colca/notify",
+		"#/notify",
+	} {
+		if api.MayImplicitlyDeliverAppNotification("_CmdOperate", path) {
+			t.Errorf("path %q gained the implicit app notification", path)
+		}
+	}
+	for _, contract := range []string{"_CmdEdit", "_CmdParam", "_CmdMaintain", "_CmdAdmin"} {
+		if api.MayImplicitlyDeliverAppNotification(contract, notification+"/notify") {
+			t.Errorf("%s gained the implicit app notification", contract)
+		}
+	}
+}
+
+// An alarm subscription is the one command read authorizes: the reader of an
+// alarm's element may ask to be told about it, someone who may act there but
+// not read there may not, and every other act keeps its class.
+func TestASubscriptionIsAuthorizedByReadOnTheAlarmsPlace(t *testing.T) {
+	const alarm = "01HALARM0000000000000000AA"
+	at := func(path, action string) string { return "colca/v1/_CmdOperate/n1/" + path + "/" + action }
+	reader := entry("", readAt("werk1/cnc5"))
+	operator := entry("", cmdAt("werk1/cnc5", "operate"))
+	neighbour := entry("", readAt("werk1/cnc6"))
+	for _, action := range []string{"subscribe", "unsubscribe"} {
+		topic := at("werk1/cnc5/"+alarm, action)
+		if !Authorize(ns, reader, ActCmd, topic) {
+			t.Fatalf("a reader of the alarm's element was refused %s", action)
+		}
+		if Authorize(ns, operator, ActCmd, topic) {
+			t.Fatalf("operate without read admitted %s: read is the authority", action)
+		}
+		if Authorize(ns, neighbour, ActCmd, topic) {
+			t.Fatalf("a reader of another element was admitted to %s here", action)
+		}
+	}
+	for _, action := range []string{"silence", "unsilence", "acknowledge"} {
+		topic := at("werk1/cnc5/"+alarm, action)
+		if Authorize(ns, reader, ActCmd, topic) {
+			t.Fatalf("read admitted %s: an act on the alarm needs operate", action)
+		}
+		if !Authorize(ns, operator, ActCmd, topic) {
+			t.Fatalf("operate was refused %s", action)
+		}
+	}
+	// A platform alarm stands on the node: its place is the alarm id alone,
+	// covered by a read of the whole node.
+	if !Authorize(ns, entry("", "read:#"), ActCmd, at(alarm, "subscribe")) {
+		t.Fatal("a reader of the node was refused a platform alarm's subscription")
+	}
+	if Authorize(ns, reader, ActCmd, at(alarm, "subscribe")) {
+		t.Fatal("a reader of one element was admitted to a platform alarm's subscription")
+	}
+}
+
+func TestReadAuthorizedAct(t *testing.T) {
+	cases := []struct {
+		contract, path, place string
+		ok                    bool
+	}{
+		{"_CmdOperate", "werk1/cnc5/A1/subscribe", "werk1/cnc5/A1", true},
+		{"_CmdOperate", "A1/unsubscribe", "A1", true},
+		{"_CmdOperate", "subscribe", "", false}, // no alarm before the action
+		{"_CmdOperate", "/subscribe", "", false},
+		{"_CmdOperate", "werk1/cnc5/A1/silence", "", false},
+		{"_CmdOperate", "werk1/subscribe/A1", "", false}, // the action is the last segment
+		{"_CmdAcknowledge", "werk1/cnc5/A1/subscribe", "", false},
+		{"_CmdParam", "werk1/cnc5/A1/subscribe", "", false},
+	}
+	for _, c := range cases {
+		place, ok := ReadAuthorizedAct(c.contract, c.path)
+		if ok != c.ok || place != c.place {
+			t.Errorf("ReadAuthorizedAct(%s, %s) = %q, %v; want %q, %v", c.contract, c.path, place, ok, c.place, c.ok)
+		}
+	}
+}
+
+// What a door witnesses about a person at a command's place: read where their
+// read zones cover it, and each cmd class a grant covers there -- not one held
+// on another element.
+func TestClassesAtTheCommandsPlace(t *testing.T) {
+	const alarm = "01HALARM0000000000000000AA"
+	sub := "werk1/cnc5/" + alarm + "/unsubscribe"
+	cases := []struct {
+		name   string
+		grants []string
+		want   string
+	}{
+		{"reader", []string{readAt("werk1/cnc5")}, "read"},
+		{"reader who configures here", []string{readAt("werk1/cnc5"), cmdAt("werk1", "configure,operate")}, "configure,operate,read"},
+		{"configure on another element", []string{readAt("werk1/cnc5"), cmdAt("werk1/cnc6", "configure")}, "read"},
+		{"read elsewhere", []string{readAt("werk1/cnc6")}, ""},
+	}
+	for _, c := range cases {
+		got := strings.Join(ClassesAt(ns, entry("", c.grants...), "_CmdOperate", sub), ",")
+		if got != c.want {
+			t.Errorf("%s: ClassesAt = %q, want %q", c.name, got, c.want)
+		}
+	}
+	// Any other command is witnessed at its own path.
+	if got := strings.Join(ClassesAt(ns, entry("", cmdAt("werk1/cnc5", "param")), "_CmdParam", "werk1/cnc5/speed/set"), ","); got != "param" {
+		t.Errorf("ClassesAt for a param command = %q, want param", got)
+	}
+	if got := ClassesAt(ns, nil, "_CmdOperate", sub); got != nil {
+		t.Errorf("ClassesAt for no actor = %v", got)
 	}
 }

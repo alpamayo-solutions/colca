@@ -29,9 +29,27 @@ for await (const record of panels.follow({ bell })) {
 ```
 
 `follow()` drains the stream and acks each page once its records have been
-consumed, then waits for the bell and drains again. It reads nothing on a
-timer; a ring during a drain leads to one more drain. A handler that throws sees its page
-again, so handlers must survive running twice on the same record.
+consumed, then waits for the bell and drains again. A ring during a drain
+leads to one more drain. A handler that throws sees its page again, so handlers
+must survive running twice on the same record.
+
+The wait on the bell is bounded. When nothing rang for `idleDrainMs` — five
+minutes unless you say otherwise, the same value the Python SDK uses —
+`follow()` reads from its cursor once more. That read recovers from a ring that
+was lost on its way to the bell: a subscription the broker dropped, a `/watch`
+connection that died without an error. Without it one lost ring would leave the
+consumer waiting beside a growing stream until it is restarted. It is not a
+polling cadence: the bell keeps a consumer current, so keep the bound long and
+ring the bell for everything that can grow the stream.
+
+```ts
+panels.follow({ bell, idleDrainMs: 60_000 }); // a shorter recovery read
+panels.follow({ bell, idleDrainMs: null }); // a ring alone: a lost ring stalls it
+```
+
+A consumer that drives its own loop gets the same from the bell:
+`await bell.after(seen, { signal, timeoutMs })` resolves with `"rang"`,
+`"timeout"` or `"aborted"`, and it reads again on the first two.
 
 For a view that wants the newest records rather than the next ones, `tail()`
 reads the end of the stream without moving the cursor — a view and a consumer

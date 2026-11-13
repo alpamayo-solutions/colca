@@ -59,6 +59,10 @@ _MEASUREMENT = {
     "valve",
     "sensors",
     "pulse_alert",
+    "euro",
+    "price_change",
+    "co2",
+    "power_input",
 }
 
 # States, identity and general UI.

@@ -53,7 +53,7 @@ type fixture struct {
 	now    time.Time
 }
 
-func newFixture(t *testing.T) *fixture {
+func newFixture(t testing.TB) *fixture {
 	t.Helper()
 	st, err := store.Open(t.TempDir())
 	if err != nil {
@@ -82,9 +82,9 @@ func newFixture(t *testing.T) *fixture {
 
 // read makes cursor exist, past one record it already read, fetched without
 // a filter since the node started.
-func (f *fixture) read(t *testing.T, cursor, stream string) {
+func (f *fixture) read(t testing.TB, cursor, stream string) {
 	t.Helper()
-	f.w.Filters.Remember(cursor, stream, nil)
+	f.w.Filters.Remember(cursor, stream, Filter{})
 	last := f.append(t, stream, "colca/v1/_Metric/NODE/read")
 	if !f.st.CursorAck(cursor, stream, last+1) {
 		t.Fatalf("cursor %s did not move", cursor)
@@ -92,7 +92,7 @@ func (f *fixture) read(t *testing.T, cursor, stream string) {
 }
 
 // append adds one record per topic, written at the fixture's clock.
-func (f *fixture) append(t *testing.T, stream string, topics ...string) uint64 {
+func (f *fixture) append(t testing.TB, stream string, topics ...string) uint64 {
 	t.Helper()
 	recs := make([]store.Record, len(topics))
 	for i, topic := range topics {
@@ -149,9 +149,9 @@ func TestUnreadRecordsOlderThanTheThresholdRaiseOneFindingUntilRead(t *testing.T
 func TestRecordsOutsideTheFetchFilterDoNotCount(t *testing.T) {
 	f := newFixture(t)
 	f.read(t, "c/dataops-line/commands", "commands")
-	f.w.Filters.Remember("c/dataops-line/commands", "commands", func(r store.StoredRecord) bool {
+	f.w.Filters.Remember("c/dataops-line/commands", "commands", Filter{Key: "mine", Keep: func(r store.StoredRecord) bool {
 		return uns.MatchFilter("colca/v1/_CmdSet/NODE/mine/#", r.Topic)
-	})
+	}})
 	f.append(t, "commands", "colca/v1/_CmdSet/NODE/other/x", "colca/v1/_CmdSet/NODE/other/y")
 
 	f.w.Check(f.now.Add(10 * time.Minute))
@@ -361,9 +361,9 @@ func TestStaleAfterZeroWritesNoStaleFinding(t *testing.T) {
 func TestAFilteredConsumerThatDoesNotAckPastSkippedRecordsIsStale(t *testing.T) {
 	f := staleFixture(t)
 	f.read(t, "c/dataops-line/entities", "entities")
-	f.w.Filters.Remember("c/dataops-line/entities", "entities", func(r store.StoredRecord) bool {
+	f.w.Filters.Remember("c/dataops-line/entities", "entities", Filter{Key: "signals", Keep: func(r store.StoredRecord) bool {
 		return strings.Contains(r.Topic, "/_Signal/")
-	})
+	}})
 	f.append(t, "entities", "colca/v1/_ServiceDetails/NODE/x")
 	f.w.Check(time.Now().Add(25 * time.Hour))
 	if len(f.writes) != 1 || f.writes[0].topic != staleTopic {

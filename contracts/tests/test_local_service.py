@@ -325,3 +325,24 @@ def _with_exception():
     return logging.LogRecord(
         "x", logging.ERROR, __file__, 1, "failed", None, info, sinfo="Stack (most recent call last):\n  here"
     )
+
+
+def test_service_state_topic_sits_at_the_service_position():
+    from colca_data_contracts import service_state_topic
+    from colca_data_contracts.routing import stream_of_contract
+
+    assert (
+        service_state_topic("colca", "n1", "line1/press3", "connector", "evaluation/01A")
+        == "colca/v1/_ServiceState/n1/line1/press3/connector/evaluation/01A"
+    )
+    assert service_state_topic("colca", "n1", "", "notifications", "/k/") == "colca/v1/_ServiceState/n1/notifications/k"
+    assert stream_of_contract("_ServiceState") == "service_state"
+
+
+def test_service_state_topic_needs_a_key():
+    import pytest
+
+    from colca_data_contracts import service_state_topic
+
+    with pytest.raises(ValueError):
+        service_state_topic("colca", "n1", "", "notifications", "/")

@@ -118,6 +118,11 @@ func (w *EditExec) composeCreate(
 	if _, occupied := w.store.KVGet(topic); occupied {
 		return 409, "duplicate_name: position is already occupied", "conflict", nil
 	}
+	if intent.Entity.Kind == "signal" {
+		if refusal := w.ownValueDefinitions(entities, intent.ParentID, attributes, true); refusal != "" {
+			return 409, refusal, "conflict", nil
+		}
+	}
 	payload, err := json.Marshal(attributes)
 	if err != nil {
 		return 422, "create: attributes are not encodable", "invalid", nil
@@ -158,6 +163,12 @@ func (w *EditExec) composeUpdate(
 		delete(merged, "system_element_id")
 		if parent, ok := current.Payload["system_element_id"]; ok {
 			merged["system_element_id"] = append(json.RawMessage(nil), parent...)
+		}
+	}
+	if _, touched := intent.Attributes["value_definitions"]; touched && current.Kind == "signal" {
+		elementID, _ := rawString(merged["system_element_id"])
+		if refusal := w.ownValueDefinitions(entities, elementID, merged, false); refusal != "" {
+			return 409, refusal, "conflict", nil
 		}
 	}
 	if len(intent.Attributes) > 0 && !rawMapsEqual(merged, current.Payload) {
@@ -212,7 +223,7 @@ func (w *EditExec) composeExternalReferences(
 
 	desiredIDs := map[string]bool{}
 	clientIDs := map[string]bool{}
-	semanticKeys := map[string]bool{}
+	identities := map[string]bool{}
 	newRecords := map[string]StateRecord{}
 	for index, reference := range *intent.ExternalReferences {
 		if reference.ClientID == "" || clientIDs[reference.ClientID] {
@@ -232,14 +243,15 @@ func (w *EditExec) composeExternalReferences(
 		if !externalSystems[reference.ExternalSystemID] {
 			return 422, "external_system_not_found: " + reference.ExternalSystemID, nil
 		}
-		semanticKey := strings.Join([]string{
-			reference.RelationshipType, reference.ExternalSystemID,
-			reference.ExternalTable, reference.ExternalRowID,
-		}, "\x00")
-		if semanticKeys[semanticKey] {
+		identity := referenceIdentity{
+			SourceEntity: reference.SourceEntity, SourceObjectID: reference.SourceObjectID,
+			RelationshipType: reference.RelationshipType, ExternalSystemID: reference.ExternalSystemID,
+			ExternalTable: reference.ExternalTable, ExternalRowID: reference.ExternalRowID,
+		}.key()
+		if identities[identity] {
 			return 422, "duplicate_external_reference", nil
 		}
-		semanticKeys[semanticKey] = true
+		identities[identity] = true
 
 		key := entityVersionKey("external-reference", reference.ID)
 		existing, belongsToSource := current[reference.ID]

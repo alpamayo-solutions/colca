@@ -129,7 +129,7 @@ var uplinkStreams = uns.UplinkStreams()
 
 // retentionStreams are the streams the retention policy applies to.
 // definitions is never pruned by age or size.
-var retentionStreams = []string{"metrics", "entities", "commands", "audit", "alarms", "annotations", "logs"}
+var retentionStreams = []string{"metrics", "entities", "commands", "audit", "alarms", "annotations", "logs", "service_state"}
 
 // Blob transfer and ingress rejection label values.
 var blobDirections = []string{"push", "pull", "receive"}
@@ -175,7 +175,8 @@ type Metrics struct {
 	uplinkFail *prometheus.CounterVec
 	// colca_uplink_refused_total: the parent answered and refused the batch (4xx).
 	// That is a misconfiguration or a bug, not a network problem.
-	uplinkRefused *prometheus.CounterVec
+	uplinkRefused  *prometheus.CounterVec
+	uplinkSetAside *prometheus.CounterVec
 	// colca_uplink_logs_withheld_total: _Log records parent.logs kept home, by
 	// level. Bounded: the label is one of the five log levels.
 	uplinkLogsWithheld *prometheus.CounterVec
@@ -194,6 +195,7 @@ type Metrics struct {
 	uplinkResyncActive   prometheus.Gauge       // colca_uplink_resync_active
 	uplinkResyncGap      *prometheus.CounterVec // colca_uplink_resync_unreplayable_records_total{stream}
 	downlinkCommandKnown prometheus.Counter     // colca_downlink_commands_already_held_total
+	clockSampleDiscarded prometheus.Counter     // colca_clock_parent_samples_discarded_total
 	reseed               prometheus.Gauge
 	authReject           *prometheus.CounterVec
 	aclDeny              *prometheus.CounterVec
@@ -202,6 +204,15 @@ type Metrics struct {
 	// outbound queue was full. A retained replay on subscribe is the usual burst;
 	// a non-zero value means delivered state went missing.
 	publishDropped prometheus.Counter
+	// What the broker holds for MQTT sessions whose client is away, and what it
+	// did not keep for them.
+	offlineSessions       prometheus.Gauge       // colca_mqtt_offline_sessions
+	offlineQueuedMessages prometheus.Gauge       // colca_mqtt_offline_queued_messages
+	offlineQueuedBytes    prometheus.Gauge       // colca_mqtt_offline_queued_bytes
+	offlineDropped        prometheus.Counter     // colca_mqtt_offline_dropped_total
+	offlineEnded          *prometheus.CounterVec // colca_mqtt_offline_sessions_ended_total{reason}
+	stalledClients        prometheus.Gauge       // colca_mqtt_stalled_clients
+	unackedDropped        prometheus.Counter     // colca_mqtt_unacked_dropped_total
 	// Publishes the broker wrote to subscribers, by door, pre-created per door.
 	deliveredMessages   *prometheus.CounterVec // colca_mqtt_delivered_messages_total{door}
 	deliveredBytes      *prometheus.CounterVec // colca_mqtt_delivered_payload_bytes_total{door}
@@ -245,7 +256,10 @@ type Metrics struct {
 	prunedRecords *prometheus.CounterVec // colca_retention_pruned_records_total{stream}
 	prunedBytes   *prometheus.CounterVec // colca_retention_pruned_bytes_total{stream}
 	pruneRuns     *prometheus.CounterVec // colca_retention_prune_runs_total{stream}
-	gapRecords    *prometheus.CounterVec // colca_retention_gap_records_total{stream}
+	// retentionBlocked is colca_retention_blocked_by_cursor{stream}, as of the
+	// pruner's last pass over the stream.
+	retentionBlocked *prometheus.GaugeVec
+	gapRecords       *prometheus.CounterVec // colca_retention_gap_records_total{stream}
 	// The state refresh only runs on the entities stream, so these are unlabeled.
 	// A failed refresh append is internal repair, not a rejected publish.
 	refreshRecords  prometheus.Counter // colca_retention_state_refresh_records_total
@@ -267,6 +281,7 @@ type Metrics struct {
 	definitionsApplied   prometheus.Counter     // colca_definitions_applied_total
 	definitionsRejected  prometheus.Counter     // colca_definitions_rejected_total
 	auditWriteFailures   prometheus.Counter     // colca_audit_write_failures_total
+	auditSuppressed      *prometheus.CounterVec // colca_audit_denials_suppressed_total{door,reason}
 	drainsCompletedBy    map[string]prometheus.Counter
 
 	// Blob transfers and ingress rejections.
@@ -291,7 +306,7 @@ type Metrics struct {
 
 	// Rate and concurrency limits. Both labels are fixed door and route classes,
 	// never paths or identities.
-	httpRequestLimited *prometheus.CounterVec // colca_http_request_limited_total{door,class}
+	httpRequestLimited *prometheus.CounterVec // colca_http_request_limited_total{door,class,reason}
 
 	// Per-caller read load, to see who spends the scan and fetch budgets. The
 	// caller label is a registered identity (kind:name), "human" for every
@@ -359,7 +374,11 @@ func New(st *store.Store, cfg config.Retention, clk *clock.Clock) *Metrics {
 		}, []string{"level"}),
 		uplinkRefused: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "colca_uplink_refused_total",
-			Help: "Uplink pushes the parent ANSWERED and refused (4xx), by stream — a misconfiguration or a bug between the two nodes, not an outage. Nothing is dropped: the batch is held and retried, so this counter rising is a lane that is not moving. Resets on restart.",
+			Help: "Uplink pushes the parent ANSWERED and refused (4xx), by stream — a misconfiguration or a bug between the two nodes, not an outage. The batch is held and retried, so this counter rising is a lane that is not moving; a single record refused for longer than the grace is set aside (colca_uplink_set_aside_total). Resets on restart.",
+		}, []string{"stream"}),
+		uplinkSetAside: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "colca_uplink_set_aside_total",
+			Help: "Records the parent refused alone for longer than the grace, set aside so the rest of the lane rises, by stream. Each one is NOT replicated: data loss at the parent. The copies are listed at GET /uplink/set-aside and in the node's uplink_set_aside finding. Resets on restart.",
 		}, []string{"stream"}),
 		downlinkOK: prometheus.NewGauge(prometheus.GaugeOpts{
 			Name: "colca_downlink_last_success_timestamp_seconds",
@@ -401,6 +420,10 @@ func New(st *store.Store, cfg config.Retention, clk *clock.Clock) *Metrics {
 			Name: "colca_downlink_commands_already_held_total",
 			Help: "Commands the parent handed down that this node already held, so they were not stored or executed again (the parent's store regressed, or the command reached the parent a second time). Resets on restart.",
 		}),
+		clockSampleDiscarded: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "colca_clock_parent_samples_discarded_total",
+			Help: "Replication responses that were not used to measure colca_clock_parent_skew_seconds because their round trip was longer than 0.5 s: a slow or stalled link, which cannot be told from skew. Resets on restart.",
+		}),
 		reseed: prometheus.NewGauge(prometheus.GaugeOpts{
 			Name: "colca_retained_reseed_records",
 			Help: "KV entries replayed into the broker's retained set at startup.",
@@ -420,6 +443,34 @@ func New(st *store.Store, cfg config.Retention, clk *clock.Clock) *Metrics {
 		publishDropped: prometheus.NewCounter(prometheus.CounterOpts{
 			Name: "colca_mqtt_publish_dropped_total",
 			Help: "Publishes the broker dropped because a client's outbound queue was full (MaximumClientWritesPending). Resets on restart.",
+		}),
+		offlineSessions: prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: "colca_mqtt_offline_sessions",
+			Help: "MQTT sessions kept for a client that is not connected.",
+		}),
+		offlineQueuedMessages: prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: "colca_mqtt_offline_queued_messages",
+			Help: "Messages queued in memory for offline MQTT sessions.",
+		}),
+		offlineQueuedBytes: prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: "colca_mqtt_offline_queued_bytes",
+			Help: "Estimated memory of the messages queued for offline MQTT sessions (payload, topic and 1 KiB per message); bounded by mqtt_limits.max_offline_bytes.",
+		}),
+		offlineDropped: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "colca_mqtt_offline_dropped_total",
+			Help: "Messages not queued for an offline MQTT session because its queue, or the queue of all offline sessions, was full. Resets on restart.",
+		}),
+		offlineEnded: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "colca_mqtt_offline_sessions_ended_total",
+			Help: "MQTT sessions removed without their client returning, by reason (expired, identity_removed, retired). Resets on restart.",
+		}, []string{"reason"}),
+		stalledClients: prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: "colca_mqtt_stalled_clients",
+			Help: "Connected MQTT clients that hold more unacknowledged messages than an offline session may keep and acknowledged nothing for 30 s. Nothing more is queued for them until they acknowledge.",
+		}),
+		unackedDropped: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "colca_mqtt_unacked_dropped_total",
+			Help: "Messages dropped for a connected MQTT client that does not acknowledge: what it held over the per-client bounds, and what was not queued for it while it was stalled. Resets on restart.",
 		}),
 		deliveredMessages: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "colca_mqtt_delivered_messages_total",
@@ -489,6 +540,14 @@ func New(st *store.Store, cfg config.Retention, clk *clock.Clock) *Metrics {
 			Name: "colca_retention_prune_runs_total",
 			Help: "Prune cycles that actually removed at least one record, by stream. Resets on restart.",
 		}, []string{"stream"}),
+		retentionBlocked: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Name: "colca_retention_blocked_by_cursor",
+			Help: "Cursors that clamped the stream below where the age/size policy would have pruned to, as of the " +
+				"retention pruner's last pass over the stream (it is not recomputed per scrape). The policy target is " +
+				"scanned under the pruner's record cap (store.DefaultPolicyScanCap): in an extreme backlog the scan may " +
+				"stop before the policy's true target and count only the cursors below that floor, so the value can " +
+				"undercount, never overcount. colca_stream_live_bytes is the never-capped signal for backlog pressure.",
+		}, []string{"stream"}),
 		gapRecords: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "colca_retention_gap_records_total",
 			Help: "Durable _StreamGap records emitted by the pruner, by stream. Resets on restart.",
@@ -545,6 +604,10 @@ func New(st *store.Store, cfg config.Retention, clk *clock.Clock) *Metrics {
 			Name: "colca_audit_write_failures_total",
 			Help: "Security audit events that could not be durably appended. The protected operation remains denied. Resets on restart.",
 		}),
+		auditSuppressed: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "colca_audit_denials_suppressed_total",
+			Help: "Repeated denials that were counted instead of written to the audit stream, by door and reason. The first denial of a caller and cause is written; its repeats are reported in one record per five minutes. Resets on restart.",
+		}, []string{"door", "reason"}),
 		blobTransfers: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "colca_blob_transfers_total",
 			Help: "Blob transfers by direction (push to parent, pull from parent, receive from child) and outcome. Resets on restart.",
@@ -575,8 +638,8 @@ func New(st *store.Store, cfg config.Retention, clk *clock.Clock) *Metrics {
 		}, []string{"result"}),
 		httpRequestLimited: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "colca_http_request_limited_total",
-			Help: "HTTP requests refused by Colca's rate or concurrency controls, by bounded door and route class. Resets on restart.",
-		}, []string{"door", "class"}),
+			Help: "HTTP requests refused by Colca's rate or concurrency controls, by bounded door, route class and the bound that refused them: rate_limit (the caller's rate; the only one with Retry-After from the bucket), concurrency_limit (the caller holds the most open requests it may), global_concurrency_limit (the node holds the most it serves), caller_limit (the node tracks the most callers it may) or busy (a parent shedding pushes its store or memory cannot take yet). Resets on restart.",
+		}, []string{"door", "class", "reason"}),
 		httpKVRequests: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "colca_http_kv_requests_total",
 			Help: "GET /kv pages served, by caller, contract filter (one contract, \"multiple\" or \"all\") and the number of segments in the prefix (0 is the whole node, capped at \"5+\"). Resets on restart.",
@@ -626,6 +689,9 @@ func New(st *store.Store, cfg config.Retention, clk *clock.Clock) *Metrics {
 	m.prunedRecordsBy = counterChildren(m.prunedRecords, retentionStreams)
 	m.prunedBytesBy = counterChildren(m.prunedBytes, retentionStreams)
 	m.pruneRunsBy = counterChildren(m.pruneRuns, retentionStreams)
+	for _, stream := range retentionStreams {
+		m.retentionBlocked.WithLabelValues(stream) // present from the first scrape
+	}
 	m.gapRecordsBy = counterChildren(m.gapRecords, retentionStreams)
 	m.gapReceivedBy = counterChildren(m.gapReceived, streams)
 	m.gapServedBy = make(map[string]map[string]prometheus.Counter, len(streams))
@@ -673,25 +739,33 @@ func New(st *store.Store, cfg config.Retention, clk *clock.Clock) *Metrics {
 	}
 	m.drainsActive.Set(float64(draining))
 
-	m.reg.MustRegister(m.ingest, m.rejected, m.uplinkOK, m.uplinkFail, m.uplinkRefused, m.uplinkLogsWithheld,
+	// Every reason exists from the first scrape, so a rate over them has a zero.
+	for _, reason := range []string{"expired", "identity_removed", "retired"} {
+		m.offlineEnded.WithLabelValues(reason)
+	}
+	m.reg.MustRegister(m.ingest, m.rejected, m.uplinkOK, m.uplinkFail, m.uplinkRefused, m.uplinkSetAside, m.uplinkLogsWithheld,
 		m.downlinkOK, m.downlinkFail, m.downlinkBeyondHead, m.downlinkHeadAbsent, m.reseed,
 		m.storeReincarnated, m.childAheadOfStore, m.uplinkResyncs, m.uplinkResyncActive, m.uplinkResyncGap,
 		m.downlinkCommandKnown,
-		m.authReject, m.aclDeny, m.kicks, m.publishDropped, m.deliveredMessages, m.deliveredBytes, m.humanSessions, m.jwksKeys, m.jwksFailures,
+		m.clockSampleDiscarded,
+		m.authReject, m.aclDeny, m.kicks, m.publishDropped,
+		m.offlineSessions, m.offlineQueuedMessages, m.offlineQueuedBytes, m.offlineDropped, m.offlineEnded,
+		m.stalledClients, m.unackedDropped,
+		m.deliveredMessages, m.deliveredBytes, m.humanSessions, m.jwksKeys, m.jwksFailures,
 		m.nodeCmds, m.securityChanges, m.nodePrefix,
 		m.commandUndelivered, m.commandUnroutable, m.commandDropped, m.commandRedelivered,
 		m.bundleInfo, m.bundleContracts,
-		m.prunedRecords, m.prunedBytes, m.pruneRuns, m.gapRecords,
+		m.prunedRecords, m.prunedBytes, m.pruneRuns, m.retentionBlocked, m.gapRecords,
 		m.refreshRecords, m.refreshSkipped, m.refreshFailures,
 		m.gapServed, m.gapReceived, m.replGapApplied, m.replIntegrityFailures,
 		m.drainsActive, m.drainPendingCommands, m.drainsCompleted,
-		m.definitionsApplied, m.definitionsRejected, m.auditWriteFailures,
+		m.definitionsApplied, m.definitionsRejected, m.auditWriteFailures, m.auditSuppressed,
 		m.blobTransfers, m.blobRejects, m.recordRejects, m.logWithheld, m.logUntracked, m.logGateWriteFailures, m.resourceReads, m.httpRequestLimited, m.blobsSwept,
 		m.httpKVRequests, m.httpKVEntries, m.httpFetchRequests, m.httpLimitedByCaller,
 		m.cursorUnreadAge,
 		m.metricsUnbound,
 		&clockCollector{clk: clk},
-		newStoreCollector(st, cfg, store.DefaultPolicyScanCap), &pebbleCollector{st: st})
+		newStoreCollector(st, cfg), &pebbleCollector{st: st})
 	return m
 }
 
@@ -701,6 +775,14 @@ func New(st *store.Store, cfg config.Retention, clk *clock.Clock) *Metrics {
 func (m *Metrics) AuditWriteFailure() {
 	if m != nil {
 		m.auditWriteFailures.Inc()
+	}
+}
+
+// AuditDenialSuppressed counts one repeated denial that was counted instead of
+// written to the audit stream.
+func (m *Metrics) AuditDenialSuppressed(door, reason string) {
+	if m != nil {
+		m.auditSuppressed.WithLabelValues(door, reason).Inc()
 	}
 }
 
@@ -849,6 +931,49 @@ func (m *Metrics) PublishDropped() {
 	m.publishDropped.Inc()
 }
 
+// SetMQTTOffline reports the offline MQTT sessions and what is queued for them.
+func (m *Metrics) SetMQTTOffline(sessions, messages int, bytes int64) {
+	if m == nil {
+		return
+	}
+	m.offlineSessions.Set(float64(sessions))
+	m.offlineQueuedMessages.Set(float64(messages))
+	m.offlineQueuedBytes.Set(float64(bytes))
+}
+
+// MQTTOfflineDropped counts one message not queued for an offline session.
+func (m *Metrics) MQTTOfflineDropped() {
+	if m == nil {
+		return
+	}
+	m.offlineDropped.Inc()
+}
+
+// SetMQTTStalledClients reports the connected clients nothing is queued for
+// because they do not acknowledge.
+func (m *Metrics) SetMQTTStalledClients(n int) {
+	if m != nil {
+		m.stalledClients.Set(float64(n))
+	}
+}
+
+// MQTTUnackedDropped counts one message dropped for a connected client that
+// does not acknowledge.
+func (m *Metrics) MQTTUnackedDropped() {
+	if m != nil {
+		m.unackedDropped.Inc()
+	}
+}
+
+// MQTTOfflineSessionEnded counts one offline session removed without its client
+// returning.
+func (m *Metrics) MQTTOfflineSessionEnded(reason string) {
+	if m == nil {
+		return
+	}
+	m.offlineEnded.WithLabelValues(reason).Inc()
+}
+
 // MQTTDelivered counts one PUBLISH written to a subscriber on door and its
 // payload size. door is one of DoorMQTT, DoorLocal and DoorHuman.
 func (m *Metrics) MQTTDelivered(door string, payloadBytes int) {
@@ -927,6 +1052,15 @@ func (m *Metrics) UplinkPushFailed(stream string) {
 		return
 	}
 	m.uplinkFail.WithLabelValues(stream).Inc()
+}
+
+// UplinkSetAside counts one record the uplink set aside after the parent kept
+// refusing it alone: a record that does not reach the parent.
+func (m *Metrics) UplinkSetAside(stream string) {
+	if m == nil {
+		return
+	}
+	m.uplinkSetAside.WithLabelValues(stream).Inc()
 }
 
 // UplinkRefused counts one uplink push the parent answered and refused. It is
@@ -1039,6 +1173,15 @@ func (m *Metrics) UplinkResyncGap(stream string, records uint64) {
 	m.uplinkResyncGap.WithLabelValues(stream).Add(float64(records))
 }
 
+// ClockParentSampleDiscarded counts one replication response whose round trip
+// was too long to measure the skew to the parent from.
+func (m *Metrics) ClockParentSampleDiscarded() {
+	if m == nil {
+		return
+	}
+	m.clockSampleDiscarded.Inc()
+}
+
 // DownlinkCommandKnown counts one command handed down that this node held.
 func (m *Metrics) DownlinkCommandKnown() {
 	if m == nil {
@@ -1053,6 +1196,15 @@ func (m *Metrics) SetReseedCount(n int) {
 		return
 	}
 	m.reseed.Set(float64(n))
+}
+
+// RetentionBlockedByCursor sets how many cursors clamped the stream below the
+// policy's target in the pruner's last pass over it.
+func (m *Metrics) RetentionBlockedByCursor(stream string, cursors int) {
+	if m == nil {
+		return
+	}
+	m.retentionBlocked.WithLabelValues(stream).Set(float64(cursors))
 }
 
 // RetentionPruneRun counts one prune cycle that removed at least one record.
@@ -1284,12 +1436,16 @@ func (m *Metrics) LogGateWriteFailed(notice bool) {
 	m.logGateWriteFailBy[kind].Inc()
 }
 
-// HTTPRequestLimited counts one 429 response. Callers supply only fixed door
-// and route-class constants, so the metric cannot acquire attacker-controlled
-// label cardinality.
-func (m *Metrics) HTTPRequestLimited(door, class string) {
+// LimitedBusy is the reason of a 429 a parent answers when it sheds pushes its
+// store or memory cannot take yet; the limiter's own reasons are its Reason values.
+const LimitedBusy = "busy"
+
+// HTTPRequestLimited counts one 429 response. Callers supply only fixed door,
+// route-class and reason constants, so the metric cannot acquire
+// attacker-controlled label cardinality.
+func (m *Metrics) HTTPRequestLimited(door, class, reason string) {
 	if m != nil {
-		m.httpRequestLimited.WithLabelValues(door, class).Inc()
+		m.httpRequestLimited.WithLabelValues(door, class, reason).Inc()
 	}
 }
 
@@ -1362,18 +1518,15 @@ func (m *Metrics) MetricUnbound() {
 }
 
 // storeCollector derives the gauge families from the store (and, for the
-// retention families, the node's retention policy) at scrape time.
+// retention pressure, the node's retention policy) at scrape time. Each costs
+// a counter read or a point lookup: a scrape scans no stream.
 type storeCollector struct {
 	st  *store.Store
 	cfg config.Retention
-	// scanCap bounds the policy target scan in blockedByCursor. Tests pass a small
-	// value.
-	scanCap uint64
 }
 
-// newStoreCollector builds the collector; tests use it to pass a small scan cap.
-func newStoreCollector(st *store.Store, cfg config.Retention, scanCap uint64) *storeCollector {
-	return &storeCollector{st: st, cfg: cfg, scanCap: scanCap}
+func newStoreCollector(st *store.Store, cfg config.Retention) *storeCollector {
+	return &storeCollector{st: st, cfg: cfg}
 }
 
 var (
@@ -1401,14 +1554,6 @@ var (
 	descRetentionPressure = prometheus.NewDesc("colca_retention_pressure",
 		"max(age_used/max_age, live_bytes/max_bytes) for the stream's currently retained window; >1 means policy wants to prune further but is cursor-clamped.",
 		[]string{"stream"}, nil)
-	descBlockedByCursor = prometheus.NewDesc("colca_retention_blocked_by_cursor",
-		"Count of cursors currently clamping the stream below where the age/size policy would otherwise prune to. "+
-			"The policy target itself is scanned under a bounded record cap (store.DefaultPolicyScanCap): in an "+
-			"extreme backlog (e.g. a long-dead consumer) the scan may stop before reaching the policy's true target, "+
-			"in which case this gauge counts cursors below that capped FLOOR instead — every counted cursor is still "+
-			"exactly blocked, so the value can only undercount, never overcount. colca_stream_live_bytes is the "+
-			"O(1), never-capped signal for unbounded backlog pressure.",
-		[]string{"stream"}, nil)
 	descChildHWM = prometheus.NewDesc("colca_child_hwm",
 		"Highest child offset already applied, per (child, stream).",
 		[]string{"child", "stream"}, nil)
@@ -1423,7 +1568,6 @@ func (c *storeCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- descCursorAdvanceAge
 	ch <- descCursorNextRecordAge
 	ch <- descRetentionPressure
-	ch <- descBlockedByCursor
 	ch <- descChildHWM
 }
 
@@ -1472,8 +1616,6 @@ func (c *storeCollector) Collect(ch chan<- prometheus.Metric) {
 	for _, s := range retentionStreams {
 		ch <- prometheus.MustNewConstMetric(descRetentionPressure, prometheus.GaugeValue,
 			c.pressure(s, now), s)
-		ch <- prometheus.MustNewConstMetric(descBlockedByCursor, prometheus.GaugeValue,
-			float64(c.blockedByCursor(s, now)), s)
 	}
 	for _, h := range c.st.HWMs() {
 		ch <- prometheus.MustNewConstMetric(descChildHWM, prometheus.GaugeValue,
@@ -1513,38 +1655,6 @@ func (c *storeCollector) oldestTS(stream string) (ts int64, ok bool) {
 		return false
 	})
 	return ts, ok
-}
-
-// blockedByCursor counts the protected cursors below the offset the age and
-// size policy would prune to, using the pruner's own store functions,
-// read-only. The scan is capped because this gauge matters most when a dead
-// consumer lets the backlog grow; past the cap the target is a floor, so the
-// count can undercount but never overcount.
-func (c *storeCollector) blockedByCursor(stream string, now time.Time) int {
-	pol := c.cfg.EffectiveStream(stream)
-	maxAge := time.Duration(pol.MaxAge)
-	maxBytes := uint64(pol.MaxBytes)
-	window := time.Duration(pol.IgnoreCursorsAfter)
-	if maxAge <= 0 && maxBytes == 0 {
-		return 0 // no policy configured: nothing can ever be "blocked"
-	}
-	lwm := c.st.LWM(stream)
-	next := c.st.NextOffset(stream)
-	liveBytes := c.st.StreamBytes(stream)
-
-	target, _, _, _ := c.st.PolicyPruneTarget(stream, lwm, next, now, maxAge, maxBytes, liveBytes, next, c.scanCap)
-	if target <= lwm {
-		return 0 // policy wants nothing further: no cursor can be "blocking"
-	}
-
-	protecting, _ := c.st.ProtectedCursors(stream, now, window)
-	blocked := 0
-	for _, cur := range protecting {
-		if cur.Position < target {
-			blocked++
-		}
-	}
-	return blocked
 }
 
 // CursorUnreadAge sets the unread age of one cursor (see the cursor watchdog).

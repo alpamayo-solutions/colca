@@ -58,6 +58,9 @@ CLASS_TABLE: dict[str, str] = {
     # A silence per element and alarm type, retained until it runs out and then
     # retired by tombstone; it outlives the alarms it covers.
     "_AlarmSilence": "entity",
+    # A person's subscription to one alarm, retained at the alarm's place so a
+    # node that takes the alarm over can adopt it; retired by tombstone.
+    "_AlarmSubscription": "entity",
     # Alarm events: append-only, not in KV, not retained, and on their own
     # stream so they never queue behind a metrics backlog.
     "_AlarmStateChange": "alarm",
@@ -76,6 +79,10 @@ CLASS_TABLE: dict[str, str] = {
     "_SemanticTag": "definition",
     "_PersonalAccessToken": "definition",
     "_AuditEvent": "audit",
+    # One service's private state (checkpoints, open work): read back only by
+    # that service, never on the bus, never replicated. colcad defines it;
+    # no bundle carries it. See ``service_state_topic``.
+    "_ServiceState": "service_state",
 }
 
 

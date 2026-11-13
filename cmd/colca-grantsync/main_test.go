@@ -1,9 +1,13 @@
 package main
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/prometheus/client_golang/prometheus"
 )
 
 func env(pairs map[string]string) func(string) string {
@@ -50,7 +54,7 @@ func TestConfigDefaults(t *testing.T) {
 	if cfg.kcAuthzClient != "colca-authz" || cfg.kcClientID != "colca-authz" {
 		t.Errorf("client defaults are %q / %q", cfg.kcClientID, cfg.kcAuthzClient)
 	}
-	if cfg.interval != 30*time.Second {
+	if cfg.interval != 5*time.Minute {
 		t.Errorf("interval default is %v", cfg.interval)
 	}
 	if cfg.httpAddr != ":9090" {
@@ -105,5 +109,28 @@ func TestBooleanFlagsAcceptTheUsualSpellings(t *testing.T) {
 		if err != nil || cfg.once {
 			t.Errorf("SYNC_ONCE=%q enabled one-shot mode (%v)", raw, err)
 		}
+	}
+}
+
+// Keycloak pushes nothing: POST /sync is how an edit there asks for a cycle
+// instead of waiting out the safety interval.
+func TestPostSyncWakesTheSyncer(t *testing.T) {
+	woken := 0
+	srv := httptest.NewServer(mux(prometheus.NewRegistry(), func() { woken++ }))
+	defer srv.Close()
+	resp, err := http.Post(srv.URL+"/sync", "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusAccepted || woken != 1 {
+		t.Fatalf("POST /sync = %d, woke %d time(s); want 202 and one wake", resp.StatusCode, woken)
+	}
+	if resp, err = http.Get(srv.URL + "/sync"); err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusMethodNotAllowed || woken != 1 {
+		t.Fatalf("GET /sync = %d, woke %d; want 405 and no wake", resp.StatusCode, woken)
 	}
 }

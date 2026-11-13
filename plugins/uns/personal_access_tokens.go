@@ -101,7 +101,7 @@ func authorizePersonalAccessToken(record *PersonalAccessToken, requiredScope str
 			return fmt.Errorf("personal access token %s: expired", record.ID)
 		}
 	}
-	if requiredScope != "" && !patContainsString(record.Scopes, requiredScope) {
+	if requiredScope != "" && !patGrantsScope(record.Scopes, requiredScope) {
 		return fmt.Errorf("personal access token %s: scope %s denied", record.ID, requiredScope)
 	}
 	return nil
@@ -156,7 +156,50 @@ func (p *PersonalAccessTokenIndex) Authenticate(token, requiredScope string, now
 	if err != nil {
 		return nil, nil, err
 	}
+	entry.Credential = record.ID + ":" + record.HashedSecret
 	return record, entry, nil
+}
+
+// Attested rebuilds the person a command was admitted for with a personal
+// access token, from the credential its attribution carries ("<token id>:
+// <hash-only digest>", Entry.Credential) and this node's own definition of
+// that token: the same token (digest), still defined here (not revoked), not
+// expired, and owned by ownerSub, the actor the command names. The person gets
+// the grants the definition holds and nothing else, so a command that came
+// down from the parent is never wider than the token is here. No scope is
+// asked: the admitting door checked the one its surface needs.
+func (p *PersonalAccessTokenIndex) Attested(credential, ownerSub string, now time.Time) (*Entry, error) {
+	id, digest, ok := strings.Cut(credential, ":")
+	if !ok || id == "" || digest == "" {
+		return nil, fmt.Errorf("personal access token credential: malformed")
+	}
+	if err := p.AuthorizeSession(id, digest, "", now); err != nil {
+		return nil, err
+	}
+	record, err := p.lookup(id)
+	if err != nil {
+		return nil, err
+	}
+	if record.OwnerSub != ownerSub {
+		return nil, fmt.Errorf("personal access token %s: not the acting person's", id)
+	}
+	entry, err := TokenEntry(record.OwnerSub, record.Grants)
+	if err != nil {
+		return nil, err
+	}
+	entry.Credential = credential
+	return entry, nil
+}
+
+// patGrantsScope reports whether a token made for scopes may use the door
+// that requires one. MCP includes the API: an agent's tools act for the person
+// through the API with the token the MCP server was given, so an mcp token is
+// also an api token; the API does not include MCP.
+func patGrantsScope(scopes []string, required string) bool {
+	if patContainsString(scopes, required) {
+		return true
+	}
+	return required == ScopeAPI && patContainsString(scopes, ScopeMCP)
 }
 
 func patContainsString(values []string, want string) bool {

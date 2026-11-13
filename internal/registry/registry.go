@@ -607,7 +607,12 @@ func (m *Manager) authoredBy(ulid string) ([]store.Record, error) {
 		if err != nil {
 			continue
 		}
-		if uns.ServiceRecordAuthor(p.Contract, kv.Payload) != ulid {
+		author := uns.ServiceRecordAuthor(p.Contract, kv.Payload)
+		if p.Contract == uns.ServiceStateContract {
+			// Its payload names nobody: the write that holds the entry does.
+			author = kv.WrittenBy
+		}
+		if author != ulid {
 			continue
 		}
 		out = append(out, store.Record{

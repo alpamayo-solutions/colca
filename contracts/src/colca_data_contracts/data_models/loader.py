@@ -24,18 +24,37 @@ YAML schema (one file per model)::
         semantic_type: machine-state # optional tag name; the loader emits a
                                       # seedable stub for any tag referenced
                                       # here that has no existing definition
-        enum: [UNKNOWN, OFFLINE, DOWN, IDLE, EXECUTING]
+        value_definitions:           # optional; what the values mean, see
+          0: UNKNOWN                 # colca_data_contracts.value_definitions
+          1: OFFLINE
         computed: true               # -> kind "computed"; default false -> "measured"
         required: true               # default true
         unit: null                   # optional
+        access: read                 # read (default) | read_write
         description: |
           0 UNKNOWN | 1 OFFLINE | ...
+      - name: speed_setpoint
+        data_type: number
+        access: read_write
+        process_tolerance: 25        # optional; how far the actual may
+                                     # differ in normal operation (unit's)
+        relationships:               # optional; directed links to other
+          - type: actual             # signal slots of this model, see
+            target: speed            # colca_data_contracts.signal_relationships
     children:
       - name: drive_end_bearing      # slot key
         child_model: BearingModel    # optional; omitted -> plain structural child
         entity_name: "M-101 DE Bearing"  # optional; defaults to the slot key
+        semantic_type: subsystem     # optional; the category the child must have
         required: true
         description: ""
+    constants:
+      - name: rated_power            # slot key AND constant name
+        data_type: number            # canonical, as for signals
+        semantic_type: rated-power   # optional, as for signals
+        unit: kW                     # optional
+        required: true               # default true
+        description: Nameplate power.
 
 Resolution rules:
 
@@ -63,6 +82,41 @@ Resolution rules:
 - Two signals, in one model or in different ones, referencing the same
   ``semantic_type`` with different ``data_type`` values is a load error
   naming every model involved. A tag name seeds exactly one stub.
+- A signal's ``access`` is ``read`` (the default) or ``read_write``. It only
+  declares that the signal may be written. A signal implementing the slot has
+  the same access.
+- A signal's ``process_tolerance`` is how far the ``actual`` of the setpoint
+  may differ from it in normal operation, in the slot's unit: a number
+  ``>= 0``, or omitted (``None``) for none. A signal implementing the slot has
+  the same tolerance.
+- A signal's ``value_definitions`` map a value of the slot's data type to
+  what it means. Keys are written as YAML values (``0:``, ``true:``, ``E17:``)
+  and compiled to their canonical text (``"0"``); the rules are
+  ``value_definitions.value_definition_problems``. A signal implementing the
+  slot carries exactly this definition. Omitted, the manifest carries ``{}``.
+- A signal's ``relationships`` link it to other signal slots of the same
+  (flattened) model by key, each with a ``type`` from
+  ``SignalRelationshipType``. They are checked after flattening against
+  ``signal_relationships.RULES``, so a link may name an inherited slot, and an
+  override that turns its target into a child slot is caught. A child slot
+  declares none of ``access``, ``process_tolerance``, ``relationships`` and
+  ``value_definitions``; its manifest carries ``access: None``,
+  ``process_tolerance: None``, no relationships and no value definitions.
+- A ``children:`` entry may name a ``semantic_type``: the category the child
+  element must carry (``machine``, ``subsystem``, ...). It is the child's
+  category, not a signal's, so it seeds a stub that applies to system
+  elements and takes no part in the one-data-type-per-tag rule.
+- A ``constants:`` entry compiles to a slot of kind ``constant``: a typed
+  value the element must carry as a ``_Constant`` (its current value is the
+  record itself, there is no acquisition and no history). It declares only
+  ``name``, ``data_type``, ``semantic_type``, ``unit``, ``required`` and
+  ``description``; ``computed``, ``access``, ``process_tolerance``,
+  ``relationships`` and ``value_definitions`` are signal-only and a load
+  error on a constant. A signal's relationship cannot target a constant slot.
+  Constant slots inherit and override through ``extends`` like any slot, and
+  their ``semantic_type`` shares the one-data-type-per-tag rule with signals.
+- One slot key declared twice in one model's YAML, in the same or in
+  different sections, is a load error.
 - Every problem found during a single ``compile_models()`` call is
   accumulated and raised together as one ``CompileError``.
 """
@@ -73,6 +127,10 @@ import json
 from pathlib import Path
 from typing import Any
 
+from colca_data_contracts.payload import SignalAccess
+from colca_data_contracts.signal_relationships import RelationshipEnd, relationship_problems
+from colca_data_contracts.value_definitions import canonical_key, value_definition_problems
+
 # The canonical slot data_type vocabulary. colca's plugins/uns.slotDataTypes
 # is checked against it through vectors/data_model_vocabulary.json.
 CANONICAL_DATA_TYPES = frozenset({"boolean", "integer", "number", "string", "json"})
@@ -80,6 +138,72 @@ CANONICAL_DATA_TYPES = frozenset({"boolean", "integer", "number", "string", "jso
 
 class CompileError(ValueError):
     pass
+
+
+ACCESS_VALUES = frozenset(str(member) for member in SignalAccess)
+
+#: Slot kinds that are not filled by a signal.
+NON_SIGNAL_KINDS = frozenset({"child", "constant"})
+
+#: Fields only a signal slot may declare; a child or constant slot refuses them.
+SIGNAL_ONLY_FIELDS = ("computed", "access", "process_tolerance", "relationships", "value_definitions")
+
+
+def _slot_relationships(where: str, raw: Any) -> tuple[list[dict[str, str]], list[str]]:
+    """A signal's ``relationships:`` as manifest entries, sorted by type and
+    target. Malformed entries are problems and are dropped."""
+    if raw is None:
+        return [], []
+    if not isinstance(raw, list):
+        return [], [f"{where}: relationships must be a list of {{type, target}} entries"]
+    entries: list[dict[str, str]] = []
+    problems: list[str] = []
+    for index, item in enumerate(raw):
+        if (
+            not isinstance(item, dict)
+            or set(item) != {"type", "target"}
+            or not isinstance(item.get("type"), str)
+            or not isinstance(item.get("target"), str)
+        ):
+            problems.append(f"{where}: relationships[{index}] must have exactly a string type and target")
+            continue
+        entries.append({"type": item["type"], "target": item["target"]})
+    entries.sort(key=lambda entry: (entry["type"], entry["target"]))
+    return entries, problems
+
+
+def _slot_process_tolerance(where: str, raw: Any) -> tuple[float | None, list[str]]:
+    """A signal's ``process_tolerance:``: a number >= 0, or None when omitted."""
+    if raw is None:
+        return None, []
+    if isinstance(raw, bool) or not isinstance(raw, int | float) or not raw >= 0:
+        return None, [f"{where}: process_tolerance must be a number >= 0, not {raw!r}"]
+    return float(raw), []
+
+
+def _slot_value_definitions(where: str, data_type: Any, raw: Any) -> tuple[dict[str, str], list[str]]:
+    """A signal's ``value_definitions:`` with canonical keys; ``{}`` when omitted."""
+    if raw is None:
+        return {}, []
+    if not isinstance(raw, dict):
+        return {}, [f"{where}: value_definitions must be a mapping of value to meaning"]
+    definitions: dict[str, str] = {}
+    problems: list[str] = []
+    for value, meaning in raw.items():
+        try:
+            key = canonical_key(str(data_type), value)
+        except ValueError as exc:
+            problems.append(f"{where}: value_definitions: {exc}")
+            continue
+        if key in definitions:
+            problems.append(f"{where}: value_definitions names {key} twice")
+            continue
+        definitions[key] = meaning
+    problems.extend(
+        f"{where}: value_definitions: {problem.message}"
+        for problem in value_definition_problems(str(data_type), definitions)
+    )
+    return definitions, problems
 
 
 def _default_source_dir() -> Path:
@@ -118,24 +242,73 @@ def _own_slots(name: str, raw: dict[str, Any]) -> tuple[dict[str, dict[str, Any]
     problems: list[str] = []
     for item in raw.get("signals") or []:
         key = item["name"]
+        if key in slots:
+            problems.append(f"{name}.{key}: slot key declared twice")
         data_type = item.get("data_type")
         if data_type not in CANONICAL_DATA_TYPES:
             problems.append(f"{name}.{key}: unknown data_type {data_type!r}; use one of {sorted(CANONICAL_DATA_TYPES)}")
+        access = item.get("access", "read")
+        if access not in ACCESS_VALUES:
+            problems.append(f"{name}.{key}: unknown access {access!r}; use one of {sorted(ACCESS_VALUES)}")
+        relationships, relationship_problems_ = _slot_relationships(f"{name}.{key}", item.get("relationships"))
+        problems.extend(relationship_problems_)
+        process_tolerance, tolerance_problems = _slot_process_tolerance(f"{name}.{key}", item.get("process_tolerance"))
+        problems.extend(tolerance_problems)
+        if "enum" in item:
+            problems.append(f"{name}.{key}: enum is not a slot field; name the values with value_definitions")
+        value_definitions, definition_problems = _slot_value_definitions(
+            f"{name}.{key}", data_type, item.get("value_definitions")
+        )
+        problems.extend(definition_problems)
         slots[key] = {
             "key": key,
             "kind": "computed" if item.get("computed", False) else "measured",
             "data_type": data_type,
             "semantic_type": item.get("semantic_type"),
             "unit": item.get("unit"),
-            "enum": list(item["enum"]) if item.get("enum") else None,
             "required": item.get("required", True),
             "description": _clean(item.get("description")),
             "declared_by": name,
             "child_model": None,
             "entity_name": None,
+            "access": access,
+            "process_tolerance": process_tolerance,
+            "relationships": relationships,
+            "value_definitions": value_definitions,
+        }
+    for item in raw.get("constants") or []:
+        key = item["name"]
+        if key in slots:
+            problems.append(f"{name}.{key}: slot key declared twice")
+        data_type = item.get("data_type")
+        if data_type not in CANONICAL_DATA_TYPES:
+            problems.append(f"{name}.{key}: unknown data_type {data_type!r}; use one of {sorted(CANONICAL_DATA_TYPES)}")
+        for field_name in SIGNAL_ONLY_FIELDS:
+            if field_name in item:
+                problems.append(f"{name}.{key}: a constant slot cannot declare {field_name}; only signal slots do")
+        slots[key] = {
+            "key": key,
+            "kind": "constant",
+            "data_type": data_type,
+            "semantic_type": item.get("semantic_type"),
+            "unit": item.get("unit"),
+            "required": item.get("required", True),
+            "description": _clean(item.get("description")),
+            "declared_by": name,
+            "child_model": None,
+            "entity_name": None,
+            "access": None,
+            "process_tolerance": None,
+            "relationships": [],
+            "value_definitions": {},
         }
     for item in raw.get("children") or []:
         key = item["name"]
+        if key in slots:
+            problems.append(f"{name}.{key}: slot key declared twice")
+        for field_name in SIGNAL_ONLY_FIELDS:
+            if field_name in item:
+                problems.append(f"{name}.{key}: a child slot cannot declare {field_name}; only signal slots do")
         entity_name = item.get("entity_name")
         if entity_name is not None and not entity_name.strip():
             problems.append(
@@ -148,14 +321,17 @@ def _own_slots(name: str, raw: dict[str, Any]) -> tuple[dict[str, dict[str, Any]
             "key": key,
             "kind": "child",
             "data_type": "",
-            "semantic_type": None,
+            "semantic_type": item.get("semantic_type"),
             "unit": None,
-            "enum": None,
             "required": item.get("required", True),
             "description": _clean(item.get("description")),
             "declared_by": name,
             "child_model": item.get("child_model"),
             "entity_name": entity_name,
+            "access": None,
+            "process_tolerance": None,
+            "relationships": [],
+            "value_definitions": {},
         }
     return slots, problems
 
@@ -217,11 +393,19 @@ def _flatten(
 def _semantic_tag_stub(tag_name: str, slot: dict[str, Any]) -> dict[str, Any]:
     """Minimal seedable tag spec for a referenced tag. The seeder only uses
     this when no live tag of that name exists (existing wins)."""
+    if slot["kind"] == "child":
+        return {
+            "name": tag_name,
+            "i18n_name": tag_name.replace("-", " ").capitalize(),
+            "description": "",
+            "applies_to": ["system_element"],
+            "icon": "category",
+        }
     return {
         "name": tag_name,
         "i18n_name": tag_name.replace("-", " ").capitalize(),
         "description": "",
-        "applies_to": ["signal"],
+        "applies_to": ["constant" if slot["kind"] == "constant" else "signal"],
         "icon": "category",
         "data_type": slot["data_type"],
     }
@@ -238,7 +422,7 @@ def _tag_stub_conflicts(own_slots: dict[str, dict[str, dict[str, Any]]]) -> list
         for key in sorted(own_slots[model_name]):
             slot = own_slots[model_name][key]
             tag_name = slot["semantic_type"]
-            if not tag_name:
+            if not tag_name or slot["kind"] == "child":
                 continue
             data_type = slot["data_type"]
             seen = first_seen.setdefault(tag_name, (data_type, model_name))
@@ -274,6 +458,20 @@ def _duplicate_child_names(model_name: str, slots: list[dict[str, Any]]) -> list
             f"{model_name}: child slots {owner!r} and {slot['key']!r} both resolve to entity_name {entity_name!r}"
         )
     return problems
+
+
+def _slot_relationship_problems(model_name: str, slots: list[dict[str, Any]]) -> list[str]:
+    """The relationship rules over one flattened model's signal slots."""
+    ends = {
+        slot["key"]: RelationshipEnd(
+            data_type=slot["data_type"],
+            relationships=[(entry["type"], entry["target"]) for entry in slot["relationships"]],
+        )
+        for slot in slots
+        if slot["kind"] not in NON_SIGNAL_KINDS
+    }
+    other_keys = {slot["key"] for slot in slots if slot["kind"] in NON_SIGNAL_KINDS}
+    return relationship_problems(ends, label=lambda key: f"{model_name}.{key}", not_signals=other_keys)
 
 
 def compile_models(source_dir: Path | None = None) -> list[dict[str, Any]]:
@@ -324,6 +522,7 @@ def compile_models(source_dir: Path | None = None) -> list[dict[str, Any]]:
             if child_name not in documents:
                 problems.append(f"{name}.{slot_key}: child_model {child_name!r} is not a known data model")
         problems.extend(_duplicate_child_names(name, manifest["slots"]))
+        problems.extend(_slot_relationship_problems(name, manifest["slots"]))
 
     child_edges: dict[str, list[tuple[str, ...]]] = {
         name: [

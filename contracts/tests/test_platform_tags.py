@@ -51,10 +51,10 @@ def _tags_the_shipped_models_require() -> dict[str, list[str]]:
     required: dict[str, list[str]] = {}
     for path in sorted(models.glob("*.yaml")):
         document = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-        for signal in document.get("signals") or []:
-            tag = signal.get("semantic_type")
+        for slot in [*(document.get("signals") or []), *(document.get("constants") or [])]:
+            tag = slot.get("semantic_type")
             if tag:
-                required.setdefault(tag, []).append(f"{path.stem}.{signal.get('name')}")
+                required.setdefault(tag, []).append(f"{path.stem}.{slot.get('name')}")
     return required
 
 

@@ -93,6 +93,53 @@
       "keyword": "maximum",
       "limit": "253402300799",
       "refusal": "invalid_field: time_start: maximum 253402300799"
+    },
+    {
+      "contract": "_AuditEvent",
+      "payload": {
+        "event_id": "evt-1",
+        "source": "api",
+        "action": "authorize",
+        "outcome": "denied",
+        "actor_kind": "anonymous",
+        "occurred_at": 1700000000000,
+        "operation": "GET rrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrr"
+      },
+      "field": "operation",
+      "keyword": "maxLength",
+      "limit": "512",
+      "refusal": "invalid_field: operation: maxLength 512"
+    },
+    {
+      "contract": "_AuditEvent",
+      "payload": {
+        "event_id": "evt-1",
+        "source": "api",
+        "action": "authorize",
+        "outcome": "denied",
+        "actor_kind": "anonymous",
+        "occurred_at": 1700000000000,
+        "reason_code": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+      },
+      "field": "reason_code",
+      "keyword": "maxLength",
+      "limit": "255",
+      "refusal": "invalid_field: reason_code: maxLength 255"
+    },
+    {
+      "contract": "_AuditEvent",
+      "payload": {
+        "event_id": "evt-1",
+        "source": "api",
+        "action": "authorize",
+        "outcome": "denied",
+        "actor_kind": "anonymous",
+        "occurred_at": 1e+20
+      },
+      "field": "occurred_at",
+      "keyword": "maximum",
+      "limit": "253402300799999",
+      "refusal": "invalid_field: occurred_at: maximum 253402300799999"
     }
   ]
 }

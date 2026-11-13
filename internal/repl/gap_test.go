@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -98,7 +99,7 @@ func TestDownlinkGapExactWireShape(t *testing.T) {
 	b64 := func(i int) string {
 		return base64.StdEncoding.EncodeToString([]byte(fmt.Sprintf(`{"correlation_id":"c%d","expires_at":99999999999}`, i)))
 	}
-	// now_ms is a live timestamp: checked for plausibility separately and removed
+	// now_ms and held_ms are live: checked for plausibility separately and removed
 	// before the exact comparison.
 	rest, nowMS := stripNowMS(t, body)
 	if nowMS < before || nowMS > after {
@@ -107,7 +108,7 @@ func TestDownlinkGapExactWireShape(t *testing.T) {
 	// Mount-stripped topics, parent offsets, records from the LWM on, and the empty
 	// definitions half with its own cursor. There is no head: only the hello
 	// response carries it, and this exact comparison keeps it off ordinary polls.
-	want := `{"def_next":1,"definitions":[],"gap":{"stream":"commands","from_offset":1,"to_offset":2,"first_ts":10,"last_ts":20,"approx":false},` +
+	want := `{"confirms":true,"def_next":1,"definitions":[],"gap":{"stream":"commands","from_offset":1,"to_offset":2,"first_ts":10,"last_ts":20,"approx":false},` +
 		`"next":5,"records":[` +
 		`{"o":3,"t":"colca/v1/_CmdParam/m1/m1/go","p":"` + b64(3) + `","ts":30},` +
 		`{"o":4,"t":"colca/v1/_CmdParam/m1/m1/go","p":"` + b64(4) + `","ts":40}]}`
@@ -123,7 +124,7 @@ func TestDownlinkGapExactWireShape(t *testing.T) {
 	body, _ = io.ReadAll(resp.Body)
 	resp.Body.Close()
 	rest, _ = stripNowMS(t, body)
-	want = `{"def_next":1,"definitions":[],"next":5,"records":[` +
+	want = `{"confirms":true,"def_next":1,"definitions":[],"next":5,"records":[` +
 		`{"o":3,"t":"colca/v1/_CmdParam/m1/m1/go","p":"` + b64(3) + `","ts":30},` +
 		`{"o":4,"t":"colca/v1/_CmdParam/m1/m1/go","p":"` + b64(4) + `","ts":40}]}`
 	if rest != want {
@@ -131,8 +132,8 @@ func TestDownlinkGapExactWireShape(t *testing.T) {
 	}
 }
 
-// stripNowMS removes now_ms from body and marshals it again with sorted keys, so
-// exact-shape assertions can check everything but the live timestamp.
+// stripNowMS removes now_ms and held_ms from body and marshals it again with sorted keys, so
+// exact-shape assertions can check everything but the live values.
 func stripNowMS(t *testing.T, body []byte) (rest string, nowMS int64) {
 	t.Helper()
 	var m map[string]json.RawMessage
@@ -146,7 +147,16 @@ func stripNowMS(t *testing.T, body []byte) (rest string, nowMS int64) {
 	if err := json.Unmarshal(raw, &nowMS); err != nil {
 		t.Fatalf("now_ms not an int64: %v", err)
 	}
+	// held_ms is live as well: how long this response was held, which the
+	// exchange around it bounds.
+	var heldMS int64
+	if raw, ok := m["held_ms"]; !ok {
+		t.Fatalf("response missing held_ms: %s", body)
+	} else if err := json.Unmarshal(raw, &heldMS); err != nil || heldMS < 0 || heldMS > 60_000 {
+		t.Fatalf("held_ms = %s, want a small non-negative int64 (%v)", raw, err)
+	}
 	delete(m, "now_ms")
+	delete(m, "held_ms")
 	b, err := json.Marshal(m)
 	if err != nil {
 		t.Fatalf("re-marshal without now_ms: %v", err)
@@ -440,13 +450,32 @@ func TestUplinkJumpsEvenWithNothingToPush(t *testing.T) {
 
 // captureLogs routes slog.Default through a buffer for the duration of the
 // test; clients constructed AFTER the call log into it.
-func captureLogs(t *testing.T) *bytes.Buffer {
+func captureLogs(t *testing.T) *lockedBuffer {
 	t.Helper()
-	var buf bytes.Buffer
+	buf := &lockedBuffer{}
 	prev := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	slog.SetDefault(slog.New(slog.NewTextHandler(buf, nil)))
 	t.Cleanup(func() { slog.SetDefault(prev) })
-	return &buf
+	return buf
+}
+
+// lockedBuffer is a bytes.Buffer a test can read while the goroutines it
+// started still log into it.
+type lockedBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *lockedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *lockedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
 }
 
 // unreachableAddr returns a loopback address nothing listens on.

@@ -5,6 +5,7 @@ package historian
 import (
 	"context"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -347,6 +348,37 @@ func TestEachValueKindSurvivesTheRoundTrip(t *testing.T) {
 	}
 }
 
+// A NUL in a JSON or text value is a row Postgres never stores: it is rejected
+// and the rest of the page lands, instead of the page failing on every retry.
+func TestANulCharacterIsRejectedAndThePageLands(t *testing.T) {
+	ctx := context.Background()
+	sink := testPool(t)
+
+	jsonNul, textNul, fine := sigID("sig-json-nul"), sigID("sig-text-nul"), sigID("sig-fine")
+	at := time.Now().UTC().Truncate(time.Millisecond)
+	nul, value := "a\x00b", 1.5
+	rows := []Row{
+		{Timestamp: at, SignalID: jsonNul, JSON: []byte(`{"text":"a\u0000b"}`), Offset: 1},
+		{Timestamp: at, SignalID: textNul, Text: &nul, Offset: 2},
+		{Timestamp: at, SignalID: fine, Number: &value, Offset: 3},
+	}
+	rejections, err := sink.Apply(ctx, rows, "test:nul", 3, "")
+	if err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+	reasons := map[string]string{}
+	for _, r := range rejections {
+		reasons[r.Row.SignalID] = r.Reason
+	}
+	if reasons[jsonNul] != "untranslatable_character" || reasons[textNul] != "character_not_in_repertoire" ||
+		len(reasons) != 2 {
+		t.Fatalf("rejections = %v", reasons)
+	}
+	if got := storedValues(t, sink, fine); describe(got) != "1.5" {
+		t.Fatalf("the valid row = %s, want 1.5", describe(got))
+	}
+}
+
 // storedValues returns the signal's rows in time order, nil for a retraction.
 func storedValues(t *testing.T, sink *Sink, signalID string) []*float64 {
 	t.Helper()
@@ -504,5 +536,73 @@ func TestAPageWrittenOverSeveralConnectionsLandsAsOneWould(t *testing.T) {
 	}
 	if marker, err := sink.Applied(ctx, "test:partitioned"); err != nil || marker != 77 {
 		t.Fatalf("marker %d, %v; want 77", marker, err)
+	}
+}
+
+// A database whose owner has not created the late write relations must stop
+// the historian at start, by name. Left to run, it writes current samples and
+// then retries every page that carries a late one forever (42P01), which on a
+// busy node is every writer from about minute 55 of an hour.
+//
+// A schema of its own, because every other test here shares the relations.
+func TestStartRefusesADatabaseWithoutTheLateWriteRelations(t *testing.T) {
+	dsn := os.Getenv("HISTORIAN_TEST_DSN")
+	if dsn == "" {
+		t.Skip("HISTORIAN_TEST_DSN not set — boundary world is not up")
+	}
+	ctx := context.Background()
+	schema := fmt.Sprintf("no_late_writes_%d_%d", time.Now().UnixNano(), os.Getpid())
+	admin, err := Open(ctx, dsn, 1)
+	if err != nil {
+		t.Fatalf("connecting: %v", err)
+	}
+	t.Cleanup(admin.Close)
+	if _, err := admin.Exec(ctx, `CREATE SCHEMA `+schema); err != nil {
+		t.Fatalf("creating the schema: %v", err)
+	}
+	t.Cleanup(func() { _, _ = admin.Exec(context.Background(), `DROP SCHEMA `+schema+` CASCADE`) })
+
+	separator := "?"
+	if strings.Contains(dsn, "?") {
+		separator = "&"
+	}
+	pool, err := Open(ctx, dsn+separator+"search_path="+schema, 2)
+	if err != nil {
+		t.Fatalf("connecting with the schema: %v", err)
+	}
+	t.Cleanup(pool.Close)
+	sink := &Sink{Pool: pool}
+
+	err = sink.EnsureSchema(ctx, 0)
+	if !errors.Is(err, ErrLateWriteRelationsMissing) {
+		t.Fatalf("EnsureSchema on a database without the relations: %v", err)
+	}
+	for _, want := range []string{"historian_late_write or historian_late_write_signal", "0005_metric_statistics"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the refusal does not name %q: %v", want, err)
+		}
+	}
+
+	// One of the two is still a refusal, naming the one that is missing.
+	if _, err := pool.Exec(ctx, `CREATE TABLE historian_late_write (
+        id bigserial PRIMARY KEY, hour timestamptz NOT NULL, signal_ids jsonb NOT NULL)`); err != nil {
+		t.Fatal(err)
+	}
+	err = sink.EnsureSchema(ctx, 0)
+	if !errors.Is(err, ErrLateWriteRelationsMissing) {
+		t.Fatalf("EnsureSchema without the signal list: %v", err)
+	}
+	if !strings.Contains(err.Error(), "no historian_late_write_signal.") {
+		t.Errorf("the refusal does not name only the missing relation: %v", err)
+	}
+
+	// The signal list as a view, as PREKIT's migrations create it: a start.
+	if _, err := pool.Exec(ctx, `
+        CREATE TABLE wanted_signals (signal_id text PRIMARY KEY);
+        CREATE VIEW historian_late_write_signal AS SELECT signal_id FROM wanted_signals`); err != nil {
+		t.Fatal(err)
+	}
+	if err := sink.EnsureSchema(ctx, 0); err != nil {
+		t.Fatalf("EnsureSchema with both relations: %v", err)
 	}
 }

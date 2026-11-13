@@ -84,3 +84,26 @@ func TestAQueuedCommandIsAnsweredQueuedWhenTheSenderAsks(t *testing.T) {
 		t.Fatalf("a repeat was answered with the progress ack: %+v", res.Command)
 	}
 }
+
+// A subscription to an alarm is forwarded on the same authority it was
+// admitted with -- read on the alarm's place -- and refused once the sender
+// no longer reads there, whatever cmd grant it holds.
+func TestForwardingASubscriptionChecksReadAgain(t *testing.T) {
+	ids := testIDs()
+	ids.routes = []string{"child1"}
+	ids.entries["hmi"].Grants = []string{"read:#"}
+	e := newEngineWithIDs(t, ids)
+
+	topic := "colca/v1/_CmdOperate/n-child/child1/m1/01HALARM0000000000000000AA/subscribe"
+	if _, err := e.IngestClient("hmi", topic, []byte(`{"correlation_id":"c-sub"}`)); err != nil {
+		t.Fatalf("a reader's subscription was refused at the door: %v", err)
+	}
+	rec := storedCommand(t, e, topic)
+	if refusal := e.ForwardRefusal(rec); refusal != "" {
+		t.Fatalf("a reader's subscription was refused when forwarded: %s", refusal)
+	}
+	ids.entries["hmi"].Grants = []string{"cmd:#:operate"}
+	if refusal := e.ForwardRefusal(rec); refusal == "" {
+		t.Fatal("a subscription was forwarded for a sender that no longer reads the alarm")
+	}
+}

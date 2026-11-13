@@ -1,0 +1,22 @@
+name: FaultCodes
+version: '1.0'
+description: |-
+  Comparable fault codes. A machine reports the fault it stands in as a code,
+  so faults can be counted and compared across machines and over time. What a
+  code means differs per machine type: those meanings belong in the fault_code
+  signal's value_definitions, not in this contract.
+signals:
+  - name: fault_code
+    data_type: integer
+    description: The active fault, 0 = none. Holds its value while the fault stands, so the
+      time a fault lasted is the time the code held. Its meanings per machine type are the
+      signal's value_definitions.
+  - name: warning_code
+    data_type: integer
+    required: false
+    description: The active warning, 0 = none. Holds its value while the warning stands.
+  - name: fault_text
+    data_type: string
+    required: false
+    description: The machine's own text for the active fault, verbatim. Empty when no fault
+      stands or the machine gives no text.

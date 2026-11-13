@@ -83,7 +83,7 @@ The contract decides which stream a record lands in and which way it flows.
 | Class | Contracts | Stream | Flows |
 |---|---|---|---|
 | data | `_Metric` | `metrics` | up |
-| entity | `_Node`, `_SystemElement`, `_Signal`, `_Constant`, `_Resource`, `_ServiceDetails`, `_EnrolledIdentity`, `_EnrollmentRequest`, `_EnrollmentPreapproval`, `_Finding`, `_AlarmState`, `_AlarmSilence` | `entities` | up |
+| entity | `_Node`, `_SystemElement`, `_Signal`, `_Constant`, `_Resource`, `_ServiceDetails`, `_EnrolledIdentity`, `_EnrollmentRequest`, `_EnrollmentPreapproval`, `_Finding`, `_AlarmState`, `_AlarmSilence`, `_AlarmSubscription` | `entities` | up |
 | definition | `_Group`, `_MetadataType`, `_AnnotationType`, `_DataModel`, `_SemanticTag` | `definitions` | down to every node |
 | command | `_CmdParam`, `_CmdConfigure`, `_CmdAdmin`, `_CmdEdit`, … | `commands` | down to the target |
 | acknowledgement | `_Ack` | `commands` | up |
@@ -91,11 +91,33 @@ The contract decides which stream a record lands in and which way it flows.
 | log | `_Log` | `logs` | up, from a minimum level ([`parent.logs`](configuration.md#log-forwarding)) |
 | annotation | `_Annotation` | `annotations` | up |
 | audit | `_AuditEvent` | `audit` | up |
+| service state | `_ServiceState` | `service_state` | stays on the node |
 
 Data and entity records have a current value. They are retained on the MQTT
 bus and appear in the key-value view. Commands, acknowledgements and the event
 classes are history only: retaining a command would deliver it again to every
 new subscriber.
+
+A `_Metric`'s current value is its newest sample by the sample's own
+`timestamp` (unix seconds), or, without one, the time the first node stored
+it. A timestamp more than one minute ahead of that ingest time counts as
+ingest time + 1 minute; the record keeps the timestamp it was published with.
+An older sample (a backfill, a repair, a catch-up) is stored as history
+and delivered to subscribers, but not as the retained message, and the
+current value stays. A sample at the same timestamp replaces it, so a
+correction lands. Every node applies the same rule, so a parent holds the
+same current value as the child it came from. Entity and definition records
+carry no sample time: the last one to arrive is current.
+
+What a producer's clock does to it: a clock that jumps back holds the current
+value at the last sample before the jump until the clock passes that time
+again, so for at most the size of the jump. A clock running ahead holds it for
+at most about a minute, the cap above. Samples published meanwhile are stored
+and delivered as usual.
+
+A topic whose third level is not one of these contracts is refused: a publish
+with the reason `grammar`, a subscription with a failed SUBACK, whatever the
+caller may read. A subscription may put a wildcard at that level.
 
 A definition has no position in the plant. Its topic is
 `colca/v1/_Group/{authoring-node}/{definition-id}`, nothing rewrites it on the
@@ -115,6 +137,40 @@ authorized at the element and at each signal; a producer publishing directly is
 checked against the schema only. The id derives from the type, the source, the
 start and the signal set, so placing an annotation or relating it does not
 change its id.
+
+### Service state
+
+`_ServiceState` is one service's private state: what a stateless service needs
+back after a restart, such as an evaluator's checkpoint or the work it has
+accepted and not finished. It is not for app or plant data, which belong in
+contracts other readers are granted.
+
+```
+{root}/v1/_ServiceState/{node}/{service-position}/{key…}
+```
+
+The service position is where the service's `_ServiceDetails` sits: its mount,
+then its name. The key is the service's own, at least one segment.
+
+- **One writer, one reader.** Only the service at that position writes and
+  reads it, besides the admin door. A write or read grant over the path does
+  not reach it, however wide; other services' `/kv`, `/kv/lookup` and
+  `/fetch` leave it out.
+- **Never on the bus.** It is neither retained nor fanned out over MQTT, and a
+  subscription that names the contract is refused. The service reads it back
+  over `GET /kv` (current value) or `GET /fetch` on `service_state`.
+- **Stays on the node.** It does not replicate up.
+- **Its own stream.** `service_state` is short-lived (24 h by default) and
+  wakes no consumer of `entities`. The current value is the key-value entry,
+  which outlives the stream's records.
+- **Goes with the service.** Revoking the service's identity
+  (`DELETE /enroll/{ulid}`) retires its `_ServiceState` with its
+  `_ServiceDetails`.
+
+colcad defines the contract itself; a contracts bundle may not declare it.
+The payload is the service's JSON object with a positive integer `version`
+(the service's own format number) and is bounded by `limits.max_record_bytes`.
+An empty payload retires the key.
 
 ### Log records
 

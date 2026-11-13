@@ -38,7 +38,7 @@ func TestAParentOverItsPushBudgetAnswersBusyAndTakesThePushLater(t *testing.T) {
 	if got := ps.NextOffset("metrics"); got != 1 {
 		t.Fatalf("a push over the budget was applied (metrics next %d)", got)
 	}
-	if v := metricstest.Value(t, m, `colca_http_request_limited_total{class="replication_bytes",door="repl"}`); v != 1 {
+	if v := metricstest.Value(t, m, `colca_http_request_limited_total{class="replication_bytes",door="repl",reason="busy"}`); v != 1 {
 		t.Fatalf("limited counter %v, want 1", v)
 	}
 
@@ -80,7 +80,7 @@ func TestTheUplinkWaitsOutABusyParentAndLosesNothing(t *testing.T) {
 
 	const busyFor = 3 * time.Second
 	time.Sleep(busyFor)
-	attempts := metricstest.Value(t, m, `colca_http_request_limited_total{class="replication_bytes",door="repl"}`)
+	attempts := metricstest.Value(t, m, `colca_http_request_limited_total{class="replication_bytes",door="repl",reason="busy"}`)
 	srv.pushBytes.used.Store(0)
 	waitFor(t, "the held batch to land", 10*time.Second, func() bool { return ps.NextOffset("metrics") == 6 })
 	time.Sleep(300 * time.Millisecond) // a second delivery would show here
@@ -120,7 +120,7 @@ func TestAParentWhoseStoreIsBehindAnswersBusy(t *testing.T) {
 	if !errors.As(err, &busy) || !busy.Busy() || busy.RetryAfter != time.Second {
 		t.Fatalf("push while the store is behind: %v, want busy with Retry-After 1s", err)
 	}
-	if v := metricstest.Value(t, m, `colca_http_request_limited_total{class="replication_backlog",door="repl"}`); v != 1 {
+	if v := metricstest.Value(t, m, `colca_http_request_limited_total{class="replication_backlog",door="repl",reason="busy"}`); v != 1 {
 		t.Fatalf("limited counter %v, want 1", v)
 	}
 	if _, err := cl.Replicate("metrics", rec); err != nil || ps.NextOffset("metrics") != 2 {

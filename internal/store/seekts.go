@@ -45,11 +45,11 @@ func (s *Store) SeekTS(stream string, ts int64) (uint64, error) {
 			hi = mid // nothing retained in [mid, hi)
 			continue
 		}
-		var e recEnc
-		if err := json.Unmarshal(iter.Value(), &e); err != nil {
+		h, err := headOf(iter.Value())
+		if err != nil {
 			return 0, fmt.Errorf("decode record %q during seek: %w", iter.Key(), err)
 		}
-		if e.TS >= ts {
+		if h.ts >= ts {
 			hi = mid // the first record at or after mid already qualifies
 			continue
 		}
@@ -61,8 +61,11 @@ func (s *Store) SeekTS(stream string, ts int64) (uint64, error) {
 
 // EachRecord calls fn for each record of stream in [from, upTo), in offset
 // order, until fn returns false. Like ScanRecords it reads a consistent Pebble
-// snapshot without holding the store mutex.
-func (s *Store) EachRecord(stream string, from, upTo uint64, fn func(StoredRecord) bool) error {
+// snapshot without holding the store mutex. head, when set, sees each record's
+// offset, topic and timestamp first, read without decoding the record where
+// possible (see peekRecord): the record is decoded and passed to fn only when
+// head says decode, and the walk ends when it says no more.
+func (s *Store) EachRecord(stream string, from, upTo uint64, head func(off uint64, topic string, ts int64) (decode, more bool), fn func(StoredRecord) bool) error {
 	if upTo <= from {
 		return nil
 	}
@@ -76,6 +79,19 @@ func (s *Store) EachRecord(stream string, from, upTo uint64, fn func(StoredRecor
 	defer iter.Close()
 	for iter.First(); iter.Valid(); iter.Next() {
 		off, _ := offsetOf(iter.Key())
+		if head != nil {
+			h, err := headOf(iter.Value())
+			if err != nil {
+				return fmt.Errorf("decode record %q during scan: %w", iter.Key(), err)
+			}
+			decode, more := head(off, h.topic, h.ts)
+			if !more {
+				break
+			}
+			if !decode {
+				continue
+			}
+		}
 		var e recEnc
 		if err := json.Unmarshal(iter.Value(), &e); err != nil {
 			return fmt.Errorf("decode record %q during scan: %w", iter.Key(), err)

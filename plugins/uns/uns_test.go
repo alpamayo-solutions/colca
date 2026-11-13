@@ -1,22 +1,37 @@
 package uns
 
 import (
+	"encoding/json"
+	"errors"
+	"fmt"
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
-func TestMetricSignalIDIsReadFromMetricsOnly(t *testing.T) {
+func TestMetricHeadIsReadFromMetricsOnly(t *testing.T) {
 	cases := []struct {
-		topic, payload, want string
+		topic, payload, signal string
+		at                     int64
+		ok                     bool
 	}{
-		{"colca/v1/_Metric/m1/line1/temp", `{"signal_id":"01ABC","value":1}`, "01ABC"},
-		{"colca/v1/_Log/m1/svc/INFO", `{"signal_id":"01ABC"}`, ""},
-		{"colca/v1/_Metric/m1/line1/temp", `{"signal_id":`, ""},
-		{"not-a-topic", `{"signal_id":"01ABC"}`, ""},
+		{"colca/v1/_Metric/m1/line1/temp", `{"signal_id":"01ABC","value":1}`, "01ABC", 0, true},
+		{"colca/v1/_Metric/m1/line1/temp", `{"signal_id":"01ABC","value":1,"timestamp":1700000000.25}`, "01ABC", 1700000000250000000, true},
+		{"colca/v1/_Metric/m1/line1/temp", `{"signal_id":"01ABC","timestamp":1700000000}`, "01ABC", 1700000000000000000, true},
+		// A timestamp that is not a number keeps the signal id and has no sample time.
+		{"colca/v1/_Metric/m1/line1/temp", `{"signal_id":"01ABC","timestamp":"2026-01-01T00:00:00Z"}`, "01ABC", 0, true},
+		{"colca/v1/_Metric/m1/line1/temp", `{"signal_id":"01ABC","timestamp":null}`, "01ABC", 0, true},
+		{"colca/v1/_Metric/m1/line1/temp", `{"signal_id":"01ABC","timestamp":-5}`, "01ABC", 0, true},
+		{"colca/v1/_Metric/m1/line1/temp", `{"signal_id":"01ABC","timestamp":1e300}`, "01ABC", 0, true},
+		{"colca/v1/_Log/m1/svc/INFO", `{"signal_id":"01ABC","timestamp":1}`, "", 0, false},
+		{"colca/v1/_Metric/m1/line1/temp", `{"signal_id":`, "", 0, false},
+		{"not-a-topic", `{"signal_id":"01ABC"}`, "", 0, false},
 	}
 	for _, c := range cases {
-		if got := MetricSignalID(c.topic, []byte(c.payload)); got != c.want {
-			t.Errorf("MetricSignalID(%q, %s) = %q, want %q", c.topic, c.payload, got, c.want)
+		signal, at, ok := MetricHead(c.topic, []byte(c.payload))
+		if signal != c.signal || at != c.at || ok != c.ok {
+			t.Errorf("MetricHead(%q, %s) = %q, %d, %v; want %q, %d, %v",
+				c.topic, c.payload, signal, at, ok, c.signal, c.at, c.ok)
 		}
 	}
 }
@@ -46,6 +61,7 @@ func TestParseAndClass(t *testing.T) {
 		"_Finding":                  {ClassEntity, "entities"},
 		"_AlarmState":               {ClassEntity, "entities"},
 		"_AlarmSilence":             {ClassEntity, "entities"},
+		"_AlarmSubscription":        {ClassEntity, "entities"},
 		"_Node":                     {ClassEntity, "entities"}, "_ServiceDetails": {ClassEntity, "entities"},
 		"_ExternalReference": {ClassEntity, "entities"},
 		"_SystemElement":     {ClassEntity, "entities"}, "_CmdParam": {ClassCmd, "commands"},
@@ -709,5 +725,47 @@ func TestParseRefusesATopicMQTTCannotCarry(t *testing.T) {
 	_, err := Parse(head + strings.Repeat("x", MaxTopicBytes-len(head)+1))
 	if err == nil || !strings.Contains(err.Error(), "MQTT carries at most 65535") {
 		t.Fatalf("a topic one byte over the limit must be refused, got %v", err)
+	}
+}
+
+// A node without a bundle holds an audit record to the same text limits, and
+// names the field the way the bundle's schema would.
+func TestTheBuiltInAuditRuleRefusesATextFieldOverItsLimit(t *testing.T) {
+	event := func(operation string) []byte {
+		raw, err := json.Marshal(map[string]any{
+			"event_id": "evt-1", "source": "api", "action": "authorize", "outcome": "denied",
+			"actor_kind": "human", "occurred_at": 1, "operation": operation,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return raw
+	}
+	limit := AuditFieldLimits()["operation"]
+	if err := Validate("_AuditEvent", event(strings.Repeat("ä", limit))); err != nil {
+		t.Fatalf("an operation at its limit was refused: %v", err)
+	}
+	err := Validate("_AuditEvent", event(strings.Repeat("ä", limit+1)))
+	var refused *FieldError
+	if !errors.As(err, &refused) {
+		t.Fatalf("want a FieldError, got %v", err)
+	}
+	if got, want := refused.Refusal(), fmt.Sprintf("invalid_field: operation: maxLength %d", limit); got != want {
+		t.Fatalf("refusal = %q, want %q", got, want)
+	}
+}
+
+func TestBoundAuditFieldCutsByCharacters(t *testing.T) {
+	limit := AuditFieldLimits()["entity_id"]
+	if got := BoundAuditField("entity_id", strings.Repeat("ä", limit+7)); got != strings.Repeat("ä", limit) {
+		t.Fatalf("cut to %d characters, want %d", utf8.RuneCountInString(got), limit)
+	}
+	// More bytes than the limit but not more characters: left whole.
+	whole := strings.Repeat("ä", limit)
+	if got := BoundAuditField("entity_id", whole); got != whole {
+		t.Fatal("a value at its limit was cut")
+	}
+	if got := BoundAuditField("metadata", strings.Repeat("x", 9000)); len(got) != 9000 {
+		t.Fatal("a field without a limit was cut")
 	}
 }

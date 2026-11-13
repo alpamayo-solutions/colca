@@ -1,6 +1,6 @@
 module github.com/alpamayo-solutions/colca
 
-go 1.26.9
+go 1.26.11
 
 require (
 	github.com/cockroachdb/pebble/v2 v2.1.7

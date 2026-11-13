@@ -1,5 +1,8 @@
 # build output
 /bin/
+# binaries `go build ./cmd/<name>` leaves in the repository root
+/colca-*
+!/colca-*/
 /build/
 /bench/results/
 /site/

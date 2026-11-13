@@ -6,7 +6,7 @@ import types
 import typing
 from collections.abc import Iterable
 from dataclasses import asdict, dataclass, field, is_dataclass
-from typing import TYPE_CHECKING, Annotated, Any
+from typing import TYPE_CHECKING, Annotated, Any, ClassVar
 
 import ulid
 from franzmq.data_contracts.base import (
@@ -84,6 +84,34 @@ class ReplicationPolicy(BaseStrEnum):
     SOURCE_LOCAL_ONLY = "source_local_only"
 
 
+class SignalAccess(BaseStrEnum):
+    """Whether a signal may be written, not only read.
+
+    ``read_write`` only declares that a value may be written to the signal's
+    source; it does not make any connector write. A signal without the field
+    is ``read``.
+    """
+
+    READ = "read"
+    READ_WRITE = "read_write"
+
+
+class SignalRelationshipType(BaseStrEnum):
+    """What a directed link from one signal (source) to another (target) means.
+
+    The rules each type carries live in ``signal_relationships.RULES``.
+    """
+
+    #: The target is the measured actual value of the source setpoint.
+    ACTUAL = "actual"
+    #: The target is the upper limit for the source value.
+    UPPER_LIMIT = "upper_limit"
+    #: The target is the lower limit for the source value.
+    LOWER_LIMIT = "lower_limit"
+    #: The target confirms that the source command took effect.
+    FEEDBACK = "feedback"
+
+
 class ConstantDataType(BaseStrEnum):
     """Value types of Colca configuration constants.
 
@@ -147,6 +175,14 @@ class AlarmSeverity(BaseStrEnum):
     INFO = "info"
     WARNING = "warning"
     CRITICAL = "critical"
+
+
+class SubscriptionChannelKind(BaseStrEnum):
+    """How an alarm subscription reaches its person: an email to their own
+    verified address, or their Workbench."""
+
+    EMAIL = "email"
+    WORKBENCH = "workbench"
 
 
 class CustomEncoder(json.JSONEncoder):
@@ -287,6 +323,10 @@ PRECISION = Bounds(minimum=0, maximum=10, integer=True)
 #: is refused where it is published instead of failing the projection of the
 #: stream it travels on.
 UNIX_SECONDS = Bounds(minimum=0, maximum=253402300799)
+
+#: The same range as unix milliseconds, for the instants a record carries in
+#: milliseconds.
+UNIX_MILLIS = Bounds(minimum=0, maximum=253402300799999)
 
 
 # ---------------------------------------------------------------------------
@@ -488,23 +528,39 @@ class ServiceDetails(ToleratesUnknownFields, Payload):
     commands: list[CommandRoute] = field(default_factory=list)
 
 
+#: An audit record's identifiers, names and codes: who acted, on what, and why
+#: it was refused. Long enough for a Keycloak resource path or a key
+#: fingerprint, and what the archive's columns are sized from.
+AUDIT_TEXT = MaxLength(255)
+
+#: What was attempted. Longer than the other fields because an API denial
+#: writes the HTTP method and the whole route here.
+AUDIT_OPERATION = MaxLength(512)
+
+
 @dataclass
 class AuditEvent(ToleratesUnknownFields, Payload):
-    """A non-state security event that travels only toward ancestor nodes."""
+    """A non-state security event that travels only toward ancestor nodes.
 
-    event_id: str
+    Every text field is bounded, so the node refuses a record its archive
+    could not store. Before, the limits lived only in the archive's columns:
+    the node accepted an API denial whose operation was longer than 64
+    characters and the read side set the record aside.
+    """
+
+    event_id: Annotated[str, AUDIT_TEXT]
     source: AuditSource
     action: AuditAction
     outcome: AuditOutcome
     actor_kind: ActorKind
-    occurred_at: int
-    operation: str | None = None
-    actor_id: str | None = None
-    actor_label: str | None = None
-    entity_type: str | None = None
-    entity_id: str | None = None
-    correlation_id: str | None = None
-    reason_code: str | None = None
+    occurred_at: Annotated[int, UNIX_MILLIS]
+    operation: Annotated[str | None, AUDIT_OPERATION] = None
+    actor_id: Annotated[str | None, AUDIT_TEXT] = None
+    actor_label: Annotated[str | None, AUDIT_TEXT] = None
+    entity_type: Annotated[str | None, AUDIT_TEXT] = None
+    entity_id: Annotated[str | None, AUDIT_TEXT] = None
+    correlation_id: Annotated[str | None, AUDIT_TEXT] = None
+    reason_code: Annotated[str | None, AUDIT_TEXT] = None
     changed_fields: list[str] = field(default_factory=list)
     metadata: dict[str, Any] = field(default_factory=dict)
 
@@ -866,6 +922,45 @@ class AlarmSilence(ToleratesUnknownFields, Payload):
     note: str | None = None
 
 
+@dataclass
+class AlarmSubscription(ToleratesUnknownFields, Payload):
+    """A person asked to be told about one alarm for a time window (on call).
+
+    The alarm's evaluator writes it when it applies the person's
+    ``_CmdOperate`` ``subscribe`` (and ends or retires it on ``unsubscribe``):
+    read on the alarm is the whole authority, since asking to be told is
+    seeing, not acting. One record per subscription and alarm, at the alarm's
+    own place, so read grants reach it like the alarm:
+    ``{root}/v1/_AlarmSubscription/{node}/{element-path}/{alarm-id}/{subscription-id}``.
+    Retained: a node that takes over evaluating the alarm adopts it from here,
+    and a tombstone retires it once ended and kept long enough.
+
+    The person's address is deliberately absent: everyone who reads the alarm
+    reads this record. The evaluator keeps the address the command carried
+    (``actor_email``) in its own store.
+    """
+
+    subscription_id: str
+    alarm_id: ULID
+    #: ``sub`` of the person, as the node witnessed it on the command.
+    subscriber_id: str
+    channel_id: str
+    channel_kind: SubscriptionChannelKind
+    #: Unix seconds: notified within [active_from, active_until).
+    active_from: float
+    active_until: float
+    #: Unix seconds.
+    created_at: float
+    updated_at: float
+    #: What the person's token called them when they subscribed.
+    subscriber_label: str = ""
+    #: Why nothing can be delivered, empty while it can: ``channel_not_offered``
+    #: (the evaluator has no such channel), ``no_verified_email``,
+    #: ``evaluator_changed`` (another node evaluates the alarm now). Kept,
+    #: not dropped, so the person sees it.
+    undeliverable: str = ""
+
+
 def derive_annotation_id(
     annotation_type_id: str,
     source: str,
@@ -1111,7 +1206,15 @@ class ExternalSystem(ToleratesUnknownFields, Payload):
 
 @dataclass
 class ExternalReference(ToleratesUnknownFields, Payload):
-    """An upward reference from a Colca object to an external-system row."""
+    """An upward reference from a Colca object to an external-system row.
+
+    Topic: ``colca/v1/_ExternalReference/{node-id}/_colca/external-references/{id}``,
+    written by the node that owns the source object.
+
+    The ``id`` addresses the record; ``identity`` says which link it is. A node
+    holds at most one record per identity and refuses a second one
+    (``duplicate_external_reference``), so a reader may key by either.
+    """
 
     id: ULID
     source_entity: Annotated[str, MaxLength(100)]
@@ -1122,6 +1225,22 @@ class ExternalReference(ToleratesUnknownFields, Payload):
     external_row_id: Annotated[str, MaxLength(255)]
     external_column: Annotated[str, MaxLength(255)] = ""
     description: str = ""
+
+    #: The fields that make two records the same reference, in order. The key
+    #: column and the description describe the link and are not part of it.
+    IDENTITY_FIELDS: ClassVar[tuple[str, ...]] = (
+        "source_entity",
+        "source_object_id",
+        "relationship_type",
+        "external_system_id",
+        "external_table",
+        "external_row_id",
+    )
+
+    @property
+    def identity(self) -> tuple[str, ...]:
+        """The object, the relationship and the external row this reference links."""
+        return tuple(str(getattr(self, name)) for name in self.IDENTITY_FIELDS)
 
 
 @dataclass
@@ -1163,6 +1282,34 @@ class BindIntent:
 
     connector: str
     variable: str
+
+
+@dataclass
+class SignalRelationship:
+    """A directed link from the signal that holds it to another signal of the
+    same node.
+
+    A signal holds at most one relationship per type, never to itself, and
+    every target is a signal the node holds when the link is written; the
+    other rules are ``signal_relationships.RULES``. Deleting the target
+    removes the link in the same batch.
+    """
+
+    relationship_type: SignalRelationshipType
+    target_signal_id: ULID
+
+
+def _relationship_wire(relationship: "SignalRelationship | dict[str, Any]") -> dict[str, str]:
+    """A relationship as its wire object, from the dataclass or a plain dict."""
+    if isinstance(relationship, dict):
+        return {
+            "relationship_type": str(relationship["relationship_type"]),
+            "target_signal_id": str(relationship["target_signal_id"]),
+        }
+    return {
+        "relationship_type": str(relationship.relationship_type),
+        "target_signal_id": relationship.target_signal_id,
+    }
 
 
 @dataclass
@@ -1215,18 +1362,34 @@ class Signal(ToleratesUnknownFields, Payload):
     precision: Annotated[int | None, PRECISION] = None
     min_value: float | None = None
     max_value: float | None = None
+    #: How far the ``actual`` of this setpoint may differ from it in normal
+    #: operation, in the signal's unit; None for none. Not a tolerance a write
+    #: is confirmed within.
+    process_tolerance: Annotated[float | None, Bounds(minimum=0)] = None
     config: dict[str, Any] = field(default_factory=dict)
     metadata: dict[str, Any] = field(default_factory=dict)
     has_contract: bool = False
     #: ULID of the `_SemanticTag` definition saying what this entity is; None
     #: means unclassified.
     semantic_type_id: ULID | None = None
+    #: Whether the signal may be written; see `SignalAccess`.
+    access: SignalAccess = SignalAccess.READ
+    #: Links from this signal to other signals of the node; see
+    #: `SignalRelationship`.
+    relationships: list[SignalRelationship] = field(default_factory=list)
+    #: What the signal's values mean: a value, as its canonical key, to a text
+    #: (``{"202": "Sieve blocked"}``). Only int, boolean and string signals
+    #: take one; the rules are ``value_definitions``. A signal filling a
+    #: data-model slot that declares one carries exactly the slot's.
+    value_definitions: dict[str, str] = field(default_factory=dict)
     created_at: str | None = None
     updated_at: str | None = None
 
     @property
     def __dict__(self):
         d = super().__dict__.copy()
+        d["access"] = str(self.access)
+        d["relationships"] = [_relationship_wire(relationship) for relationship in self.relationships]
         if self.data_type is not None:
             d["data_type"] = str(self.data_type)
         if self.index_type is not None:
@@ -1248,6 +1411,16 @@ class Signal(ToleratesUnknownFields, Payload):
             )
         if "replication_policy" in data:
             data["replication_policy"] = ReplicationPolicy(data["replication_policy"])
+        if data.get("access") is not None:
+            data["access"] = SignalAccess(data["access"])
+        if isinstance(data.get("relationships"), list):
+            data["relationships"] = [
+                SignalRelationship(
+                    relationship_type=SignalRelationshipType(item["relationship_type"]),
+                    target_signal_id=item["target_signal_id"],
+                )
+                for item in data["relationships"]
+            ]
         if data.get("data_type") is not None:
             # SignalDataType, because a _Signal may be json and franzmq's
             # DataType has no such member.

@@ -35,7 +35,7 @@ stored copy.
 
 Each node keeps a set of append-only streams with gapless offsets:
 `metrics`, `entities`, `commands`, `definitions`, `alarms`, `logs`,
-`annotations` and `audit`. Which stream a record lands in follows from its
+`annotations`, `audit` and `service_state`. Which stream a record lands in follows from its
 contract (see [Topics](topics.md#contract-classes)).
 
 Next to the streams, the node keeps the latest value of every data and entity
@@ -166,6 +166,30 @@ for it, in order.
   in one write, so a command handed again after a crash or a lost response is
   recognized and not stored or executed twice. Executors still deduplicate by
   `correlation_id`, and must not repeat an effect that is not idempotent.
+- **What waited together is stored together.** A child stores the commands
+  of one fetch in a single write, up to 200 at a time, and delivers none of
+  them before all are in its `commands` stream. Before that write it asks the
+  parent once more, without waiting, for everything that waits for it now: the
+  parent answers a waiting fetch the moment the first command arrives, and on
+  a link that stalls that answer can be seconds old when the child reads it.
+  So a consumer that is handed a command finds behind it, in the node's
+  stream, every command the parent held for this node when it answered that
+  second request. Two commands issued while a node was away, such as a
+  request and its withdrawal, are therefore never seen one without the other.
+
+    What this does not cover: a command issued after the parent answered. It
+    arrives later, however short the time between the two, and nothing recalls
+    a command that was already handed over. A sender that takes something
+    back must wait for the executor's `_Ack` to learn which of the two took
+    effect. A consumer that reads ahead before it acts reads its own stream
+    from the command's offset to the head once; it does not wait and read
+    again. If the second request fails, the commands in hand are stored as
+    they are rather than kept back on a failing link, and under a parent older
+    than this behaviour the child stores each fetch as it arrives. The
+    exception is a parent that refuses the second request because it no
+    longer enrolls the node: it revoked the node, or a drain retired it and
+    recorded those commands as expired, so the child drops the page instead
+    of delivering what the parent resolved without it.
 - **Progress, if asked.** With `"progress": true` in the command, the sender
   also gets `_Ack` records with `result_code` `202` and a `stage`: `queued`
   from the node that accepted it for a child, and `forwarded` from every node
@@ -302,6 +326,15 @@ node can already answer binds at once. Two signals waiting for the same tag
 leave it unbound (autobind reports them as `ambiguous`). Unbinding a signal
 drops its intent, so a later publish does not bind it again.
 
+**What a tag states.** A catalogue tag's `meta` may state a `unit`, a
+`description` and a `semantic_type` (a `_SemanticTag` name or id). Binding
+fills the signal's empty fields from them; `semantic_type` becomes
+`semantic_type_id` once the node holds that `_SemanticTag`. A semantic tag that
+reaches the node after the binding (from the parent, through
+`definition/upsert`, or at startup) is given to every bound signal whose tag
+names it and that has no semantic type yet. A signal that already has one keeps
+it.
+
 **Taking a tag over.** A signal that autobind minted carries `is_autobound:
 true`. A `signal/upsert` entry with `"take_over": true` and a `data_tag` held
 by such a signal moves the tag to the upserted signal and retires the minted
@@ -312,6 +345,85 @@ it. The retired signal's metric
 history stays in the historian under the retired signal's id; nothing is
 deleted or rewritten there. A signal minted before `is_autobound` existed
 counts as minted when it carries no field autobind does not write.
+
+**Access.** A signal's `access` is `read` (the default, and what a record
+without the field means) or `read_write`. It only declares that the signal's
+value may be written to its source; it makes no connector write. A data-model
+slot carries the same field, and a signal implementing a slot has its access:
+assigning a model makes the signal of a `read_write` slot `read_write`, and
+refuses a `read_write` signal for a `read` slot.
+
+**Process tolerance.** A setpoint signal's `process_tolerance` is how far its
+`actual` may differ from it in normal operation, in the signal's unit: a
+number `>= 0`, or absent/`null` for none. It is not a tolerance a write is
+confirmed within. A data-model signal slot carries the same field
+(`process_tolerance: 100` in the model YAML; the compiler refuses a negative
+one). Assigning a model gives a signal without a tolerance its slot's, and
+refuses a signal whose tolerance differs from the slot's.
+
+**Value definitions.** A signal's `value_definitions` say what its values
+mean: `{"202": "Sieve blocked"}` for a fault code, `{"0": "UNKNOWN", …}` for a
+machine state. Keys are the value written its one canonical way (`int`: base
+ten without leading zeros or `+`; `boolean`: `true`/`false`; `string`: the value
+itself), and only `int`, `boolean` and `string` signals take a definition. A
+definition names at most 500 values; a meaning is 1–120 characters without
+surrounding whitespace. The node refuses a write that breaks a rule, including
+a `data_type` change the definition no longer fits, with a `422`
+`invalid_field: value_definitions: <keyword>[ <limit>]`. A data-model signal slot
+may declare one (`value_definitions: {0: UNKNOWN, 1: OFFLINE}` in the model
+YAML) and then owns it: assigning the model gives every signal filling the slot,
+required or optional, exactly the slot's definition; creating a signal that
+fills the slot without one gives it the slot's; and a create or edit that would
+give it another is refused with `409 value_definitions_owned_by_model: <model>`.
+Slots that declare none leave the signal's own definition free to edit. The
+rules are `colca_data_contracts.value_definitions`; the builtin `MachineState`
+model declares its states this way, and `FaultCodes` leaves the meanings of
+`fault_code` to each signal.
+
+**Relationships.** A signal links to other signals of its node with
+`relationships: [{"relationship_type": …, "target_signal_id": …}]`, at most one
+link per type:
+
+| Type | The target is | Rules |
+|---|---|---|
+| `actual` | the measured actual value of this setpoint | a target is the actual of at most one setpoint; no chains; data types equal or both numeric |
+| `upper_limit` | the upper limit for this value | both numeric; no cycles |
+| `lower_limit` | the lower limit for this value | both numeric; no cycles |
+| `feedback` | the confirmation that this command took effect | no chains |
+
+The node checks a signal's links when a write changes them, whichever door
+the write comes through, and refuses a broken one with a `422`
+(`invalid_relationships: …`) naming the signal and the rule. A write that
+retires a signal drops the links naming it in the same commit. Data-model slots
+declare links by slot key (`relationships: [{type, target}]`), and assigning
+the model gives the signals filling the slots the same links. The rules are
+`colca_data_contracts.signal_relationships.RULES`.
+
+**Constant slots.** A data model may require constants next to signals: a
+`constants:` section in the model YAML (`name`, `data_type`, `semantic_type`,
+`unit`, `required`, `description`) compiles to slots of kind `constant`, which
+inherit through `extends` like any slot. A constant slot is filled by the
+element's `_Constant` of that name, with a compatible data type (`number` is
+`float64`, `integer` is `int64`) and the slot's semantic type. Assigning the
+model gives a matching constant without a semantic type the slot's, and refuses
+a constant of another data type or semantic type, or a signal holding the
+slot's name (`409`). It never creates a constant, because a constant's value is
+authored: a missing required constant leaves the element's coverage incomplete
+until someone writes it. A constant slot declares no `access`,
+`process_tolerance`, `relationships` or `value_definitions`, and no signal may
+link to it. The builtin `EnergyConsumer` requires `rated_power` this way, and
+`EnergySupply` consists of constants only.
+
+**Units and child categories on assign.** Assigning a model gives a signal or
+constant without a unit the slot's `unit`, as it gives one without a semantic
+type the slot's. A unit the entity already carries is kept and not judged here:
+whether it fits the slot (the same unit, or one convertible within the quantity
+kind of the slot's semantic type) is decided where the quantity kinds are
+known, at the command boundary of the API that sends the assign. A `children:`
+entry may name a `semantic_type`, the category the child element must carry
+(`machine`, `subsystem`, ...): assigning creates a missing child with it, gives
+an unclassified child it, and refuses (`409`) a child of another category, or
+two models asking one child slot for two categories.
 
 ### Fetching a node's logs
 

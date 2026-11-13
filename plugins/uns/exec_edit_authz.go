@@ -7,7 +7,7 @@ import (
 
 // Plan before write, then authorize the plan. A _CmdEdit is composed into the
 // records it will write, and every position in that plan is checked with
-// AuthorizeCmdAt against the actor's configure grants; one uncovered position
+// AuthorizeCmdAt against the actor's grants; one uncovered position
 // refuses the whole command with nothing written. The door only checks the
 // class, since the route names the owning node, not a position.
 //
@@ -24,8 +24,13 @@ type editTouched struct {
 	path string
 	key  string
 	// operate marks a position an operate grant also covers: an annotation
-	// the person creates or authored. Editing someone else's needs configure.
+	// the person creates or authored, keeping the identity it was created
+	// with.
 	operate bool
+	// annotate marks a position an annotate grant also covers: every
+	// position of an annotation intent, whoever authored the annotation and
+	// whatever the intent changes about it. configure covers them too.
+	annotate bool
 	// param marks a position a param grant also covers: updating the value
 	// and metadata of an existing constant (an operator input), never its
 	// creation, deletion or any other attribute. See constantParamEligible.
@@ -33,14 +38,15 @@ type editTouched struct {
 }
 
 // authorizeTouched refuses the command unless every touched position is
-// covered by the actor's grants — configure always, operate or param where
-// the position allows it. code 0 means covered.
+// covered by the actor's grants — configure always, annotate, operate or param
+// where the position allows it. code 0 means covered.
 func (w *EditExec) authorizeTouched(ctx CommandContext, touched []editTouched) (int, string, string) {
 	for _, t := range touched {
 		// Only a "#" zone covers the node root (empty path): a realm-wide
 		// grant, or a grant on the node's own element or an ancestor, which
 		// zoneOf resolves to "#". A grant on an element below the node does not.
 		covered := AuthorizeCmdAt(w.scope, ctx.Actor, "configure", t.path) ||
+			(t.annotate && AuthorizeCmdAt(w.scope, ctx.Actor, "annotate", t.path)) ||
 			(t.operate && AuthorizeCmdAt(w.scope, ctx.Actor, "operate", t.path)) ||
 			(t.param && AuthorizeCmdAt(w.scope, ctx.Actor, "param", t.path))
 		if !covered {
@@ -107,7 +113,8 @@ func AnnotationSource(e *Entry) string {
 // intent: always for a create, and for an update or delete only of the
 // person's own annotation, which the derived id proves without a lookup. The id
 // is re-derived from the intent's signal_ids, so an update under operate must
-// keep the original signal set. Configure may change any annotation.
+// keep the original signal set. Annotate and configure may change any
+// annotation, including its start and its signals.
 func annotationOperable(intent editIntent, actor *Entry) bool {
 	if intent.Action == "create" {
 		return true
@@ -280,21 +287,21 @@ func (w *EditExec) planFor(
 	case "annotation":
 		// The record sits at a reserved path, so the positions are the element
 		// and the signals the annotation names; with neither, only a
-		// realm-wide grant covers it. An operate grant also covers a create or
-		// the person's own annotation.
+		// realm-wide grant covers it. An annotate grant covers any annotation
+		// there; an operate grant a create or the person's own annotation.
 		operable := annotationOperable(intent, ctx.Actor)
 		touched := make([]editTouched, 0, len(intent.SignalIDs))
 		if intent.SystemElementID != "" {
 			t := touchedEntity(entities, "system-element", intent.SystemElementID)
-			t.operate = operable
+			t.operate, t.annotate = operable, true
 			touched = append(touched, t)
 		}
 		if len(touched) == 0 && len(intent.SignalIDs) == 0 {
-			return []editTouched{{path: "", key: "signal:", operate: operable}}
+			return []editTouched{{path: "", key: "signal:", operate: operable, annotate: true}}
 		}
 		for _, id := range intent.SignalIDs {
 			t := touchedEntity(entities, "signal", id)
-			t.operate = operable
+			t.operate, t.annotate = operable, true
 			touched = append(touched, t)
 		}
 		return touched

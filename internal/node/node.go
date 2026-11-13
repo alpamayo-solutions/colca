@@ -411,13 +411,17 @@ func Start(cfg *config.Config) (*Node, error) {
 		})
 		return err
 	})
+	// One index of this node's personal access token definitions: the door
+	// verifies a presented token with it, and the engine rebuilds the person
+	// of a command admitted with one (here, or at the parent) from it.
+	pats := uns.NewPersonalAccessTokenIndex(n.Engine.EntityStore()).
+		WithAuthority(cfg.ULID, cfg.Standalone, cfg.RetiredPATs)
+	n.Engine.SetPersonalAccessTokens(pats)
 	if ver != nil {
 		// People's grants come from their token's groups, resolved against the
 		// definitions this node holds.
 		ver.SetGroupIndex(n.Engine.Groups())
-		ver.SetPersonalAccessTokenIndex(uns.NewPersonalAccessTokenIndex(
-			n.Engine.EntityStore(),
-		).WithAuthority(cfg.ULID, cfg.Standalone, cfg.RetiredPATs))
+		ver.SetPersonalAccessTokenIndex(pats)
 	}
 	// Contracts bundle: the configured path, the baked one if present, or the
 	// built-in rules. A configured bundle that fails to load stops startup rather
@@ -668,6 +672,14 @@ func Start(cfg *config.Config) (*Node, error) {
 		n.Engine.RunLogGate(n.stop)
 	}()
 
+	// Repeated denials are counted, not written one by one; their counts are
+	// written when the window ends. Stop writes what is still counted.
+	n.wg.Add(1)
+	go func() {
+		defer n.wg.Done()
+		n.Engine.RunAuditRepeats(n.stop)
+	}()
+
 	// 11. Replicated records reach the bus through one goroutine (see
 	//     engine/repldeliver.go).
 	n.wg.Add(1)
@@ -784,6 +796,7 @@ func (n *Node) Stop() {
 		// withheld without a summary.
 		if n.Engine != nil {
 			n.Engine.FlushLogs()
+			n.Engine.FlushAuditRepeats()
 		}
 		if n.MQTT != nil {
 			_ = n.MQTT.Close()

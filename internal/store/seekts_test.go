@@ -81,7 +81,7 @@ func TestEachRecordStopsAndBounds(t *testing.T) {
 	s := mustOpen(t)
 	appendLogs(t, s, 10, 20, 30, 40)
 	var offs []uint64
-	if err := s.EachRecord("logs", 2, 4, func(r StoredRecord) bool {
+	if err := s.EachRecord("logs", 2, 4, nil, func(r StoredRecord) bool {
 		offs = append(offs, r.Offset)
 		return true
 	}); err != nil {
@@ -91,7 +91,7 @@ func TestEachRecordStopsAndBounds(t *testing.T) {
 		t.Fatalf("EachRecord [2,4) = %v, want [2 3]", offs)
 	}
 	offs = nil
-	if err := s.EachRecord("logs", 1, 99, func(r StoredRecord) bool {
+	if err := s.EachRecord("logs", 1, 99, nil, func(r StoredRecord) bool {
 		offs = append(offs, r.Offset)
 		return r.TS < 20
 	}); err != nil {

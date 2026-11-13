@@ -1,7 +1,7 @@
 """The MachineState enums and the compiled ``MachineState`` data model agree.
 
 The ordinals are stored, so they must not change between releases or drift
-from the model's ``enum`` slot values.
+from the value definitions the model's slots declare.
 """
 
 from colca_data_contracts.data_models import compile_models
@@ -60,17 +60,14 @@ def test_state_reason_is_fixed_14():
     assert StateReason.GRADE_CHANGE == 13
 
 
-# --- consistency: the manifest's enum slots mirror the IntEnums exactly ---
+# --- consistency: the slots' value definitions mirror the IntEnums exactly ---
 
 
 def _assert_manifest_matches_enum(slot_name: str, enum_cls):
-    enum_values = _slot(slot_name)["enum"]
-    # index-for-index == value-for-value, name-for-name
-    assert enum_values == [member.name for member in enum_cls], f"{slot_name} enum drifted from {enum_cls.__name__}"
-    for index, name in enumerate(enum_values):
-        assert enum_cls[name].value == index, (
-            f"{slot_name}: {name} is index {index} in the manifest but {enum_cls[name].value} in {enum_cls.__name__}"
-        )
+    definitions = _slot(slot_name)["value_definitions"]
+    assert definitions == {str(member.value): member.name for member in enum_cls}, (
+        f"{slot_name} value definitions drifted from {enum_cls.__name__}"
+    )
 
 
 def test_machine_state_manifest_matches_enum():

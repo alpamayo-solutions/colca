@@ -11,10 +11,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"strings"
 )
 
 // modelSlot is the part of a _DataModel slot compose needs: name, kind,
-// canonical type and required semantic tag name. DeclaredBy is the model whose
+// canonical type and required semantic tag name. Kind is measured or computed
+// (filled by a signal), constant (filled by a _Constant) or child (filled by a
+// system element). DeclaredBy is the model whose
 // YAML declared the slot; a model that inherits it via extends keeps the
 // parent's value, so the two share one computed slot.
 type modelSlot struct {
@@ -32,6 +35,77 @@ type modelSlot struct {
 	// EntityName is the child's name: the slot key, or the entity_name
 	// override from the YAML. Never empty for a child slot.
 	EntityName string `json:"entity_name"`
+	// Access is the signal slot's access, read or read_write; empty (read)
+	// for a child slot and for a manifest compiled before slots carried it.
+	Access string `json:"access"`
+	// ProcessTolerance is how far the actual of the signal slot may differ
+	// from it in normal operation; nil for none, for a child slot and for a
+	// manifest compiled before slots carried it.
+	ProcessTolerance *float64 `json:"process_tolerance"`
+	// Relationships link this signal slot to other signal slots of the model,
+	// by key. Assign gives the signals that fill the slots the same links.
+	Relationships []slotRelationship `json:"relationships"`
+	// ValueDefinitions say what the slot's values mean, by canonical key.
+	// When set, the slot owns them: every signal filling it carries exactly
+	// these (see model_value_definitions.go).
+	ValueDefinitions map[string]string `json:"value_definitions"`
+}
+
+// slotRelationship is one link a data-model slot declares: its type and the
+// key of the target slot.
+type slotRelationship struct {
+	Type   string `json:"type"`
+	Target string `json:"target"`
+}
+
+// slotLinkTarget is the target key a slot's link of one type names.
+func slotLinkTarget(slot modelSlot, kind string) string {
+	for _, link := range slot.Relationships {
+		if link.Type == kind {
+			return link.Target
+		}
+	}
+	return ""
+}
+
+// validateSlotDeclarations checks a model's slot access and relationships by
+// the rules the Python loader applies after flattening. A manifest the loader
+// compiled passes; a hand-written one may not.
+func validateSlotDeclarations(model string, slots []modelSlot) []string {
+	problems := []string{}
+	ends := map[string]relationshipEnd{}
+	// Child and constant slots are no signals, so a link to one is refused.
+	children := map[string]bool{}
+	for _, slot := range slots {
+		if slot.Kind == "child" || slot.Kind == "constant" {
+			children[slot.Key] = true
+			if slot.Access != "" || len(slot.Relationships) > 0 || len(slot.ValueDefinitions) > 0 {
+				problems = append(problems, fmt.Sprintf(
+					"%s slot %q: a %s slot declares no access, relationships or value definitions", model, slot.Key, slot.Kind,
+				))
+			}
+			continue
+		}
+		if len(slot.ValueDefinitions) > 0 {
+			definitions := make(map[string]any, len(slot.ValueDefinitions))
+			for key, meaning := range slot.ValueDefinitions {
+				definitions[key] = meaning
+			}
+			if problem := valueDefinitionsProblem(slot.DataType, definitions); problem != nil {
+				problems = append(problems, fmt.Sprintf("%s slot %q: %v", model, slot.Key, problem.Err))
+			}
+		}
+		if slot.Access != "" && !signalAccessValues[slot.Access] {
+			problems = append(problems, fmt.Sprintf("%s slot %q: unknown access %q", model, slot.Key, slot.Access))
+		}
+		links := make([]relationshipLink, len(slot.Relationships))
+		for i, link := range slot.Relationships {
+			links[i] = relationshipLink(link)
+		}
+		ends[slot.Key] = relationshipEnd{DataType: slot.DataType, Links: links}
+	}
+	label := func(key string) string { return fmt.Sprintf("%s slot %q", model, key) }
+	return append(problems, relationshipProblems(ends, label, nil, children)...)
 }
 
 // dataModelManifest holds the fields of a _DataModel record composeModel
@@ -182,11 +256,7 @@ func modelsRemoved(original, desired []string) []string {
 // directChildrenByName indexes parentID's direct element children by name;
 // the lowest id wins a duplicate name.
 func directChildrenByName(entities map[string]editSnapshot, parentID string) map[string]editSnapshot {
-	type candidate struct {
-		id     string
-		entity editSnapshot
-	}
-	owned := make([]candidate, 0)
+	owned := make([]namedEntity, 0)
 	for _, entity := range entities {
 		if entity.Kind != "system-element" {
 			continue
@@ -196,11 +266,23 @@ func directChildrenByName(entities map[string]editSnapshot, parentID string) map
 			continue
 		}
 		id, _ := rawString(entity.Payload["id"])
-		owned = append(owned, candidate{id: id, entity: entity})
+		owned = append(owned, namedEntity{id: id, entity: entity})
 	}
-	sort.Slice(owned, func(i, j int) bool { return owned[i].id < owned[j].id })
+	return lowestIDByName(owned)
+}
+
+// namedEntity is an entity with its id, for indexing by name.
+type namedEntity struct {
+	id     string
+	entity editSnapshot
+}
+
+// lowestIDByName indexes entities by name, the lowest id winning a duplicate
+// name, so a match never depends on map order.
+func lowestIDByName(items []namedEntity) map[string]editSnapshot {
+	sort.Slice(items, func(i, j int) bool { return items[i].id < items[j].id })
 	byName := map[string]editSnapshot{}
-	for _, item := range owned {
+	for _, item := range items {
 		name, _ := rawString(item.entity.Payload["name"])
 		if name == "" {
 			continue
@@ -281,7 +363,10 @@ func (w *EditExec) mandatedChildModels(
 // system element. "models" is always the full desired list, so the element
 // update is the same for both. Assign resolves every slot of every model,
 // signals and child elements, in one batch; unassign strips the removed models
-// from the mandated children. Neither deletes an element or a signal.
+// from the mandated children. Neither deletes an element or a signal. A
+// constant slot is only matched: assign gives an existing constant the slot's
+// semantic type but never creates one, because a constant's value is authored,
+// not acquired. A missing required constant leaves the coverage incomplete.
 func (w *EditExec) composeModel(
 	intent editIntent,
 	expected map[string]uint64,
@@ -442,6 +527,9 @@ func (w *EditExec) resolveModelSlots(
 				return 422, fmt.Sprintf("model: %s slot %q has unknown data_type %q", name, slot.Key, slot.DataType)
 			}
 		}
+		if problems := validateSlotDeclarations(name, state.manifests[name].Slots); len(problems) > 0 {
+			return 422, "model: " + strings.Join(problems, "; ")
+		}
 	}
 
 	// Two desired models may not compute the same slot unless it is the
@@ -456,6 +544,20 @@ func (w *EditExec) resolveModelSlots(
 	}
 	requiredSignals := map[string]requirement{}
 	signalOrder := []string{}
+	// What the models declare for each required signal slot beyond its type:
+	// the access it needs and the links it holds, by target slot key.
+	slotAccess := map[string]requirement{}
+	slotLinks := map[string]map[string]requirement{} // key -> type -> the declaring slot
+	slotTolerance := map[string]requirement{}
+	// The value definitions signal slots own, required or optional.
+	slotDefinitions := map[string]requirement{}
+	definitionOrder := []string{}
+	// Required constant slots, and the kind every signal or constant key was
+	// first declared with, so one key cannot be a signal in one model and a
+	// constant in another.
+	requiredConstants := map[string]requirement{}
+	constantOrder := []string{}
+	slotKinds := map[string]requirement{}
 
 	// Child slots with the same key merge: every child_model at that key is
 	// applied to the same child. Two different keys with the same
@@ -468,6 +570,9 @@ func (w *EditExec) resolveModelSlots(
 		entityName  string
 		required    bool
 		childModels []string
+		// semanticType is the category the child must carry, when a slot
+		// names one; every model naming the slot must agree on it.
+		semanticType string
 	}
 	requiredChildren := map[string]*childRequirement{}
 	childOrder := []string{}
@@ -500,6 +605,14 @@ func (w *EditExec) resolveModelSlots(
 				if slot.Required {
 					cr.required = true
 				}
+				if slot.SemanticType != "" {
+					if cr.semanticType != "" && cr.semanticType != slot.SemanticType {
+						return 409, fmt.Sprintf(
+							"model: %s and %s require different categories for child slot %q", cr.model, name, slot.Key,
+						)
+					}
+					cr.semanticType = slot.SemanticType
+				}
 				if slot.ChildModel != "" {
 					if _, ok := state.manifests[slot.ChildModel]; !ok {
 						return 409, fmt.Sprintf(
@@ -512,14 +625,68 @@ func (w *EditExec) resolveModelSlots(
 				}
 				continue
 			}
+			if prev, seen := slotKinds[slot.Key]; seen && (prev.slot.Kind == "constant") != (slot.Kind == "constant") {
+				return 409, fmt.Sprintf(
+					"model: %s and %s disagree on whether %q is a signal or a constant", prev.model, name, slot.Key,
+				)
+			}
+			slotKinds[slot.Key] = requirement{slot: slot, model: name}
+			if slot.Kind == "constant" {
+				if !slot.Required {
+					continue
+				}
+				if prev, seen := requiredConstants[slot.Key]; seen {
+					if prev.slot.DataType != slot.DataType || prev.slot.SemanticType != slot.SemanticType {
+						return 409, fmt.Sprintf("model: %s and %s require incompatible %q", prev.model, name, slot.Key)
+					}
+					continue
+				}
+				requiredConstants[slot.Key] = requirement{slot: slot, model: name}
+				constantOrder = append(constantOrder, slot.Key)
+				continue
+			}
 			if slot.Kind == "computed" {
 				if holder, taken := computedBy[slot.Key]; taken && holder.declaredBy != slot.DeclaredBy {
 					return 409, fmt.Sprintf("model: %s and %s both compute %q", holder.model, name, slot.Key)
 				}
 				computedBy[slot.Key] = computer{model: name, declaredBy: slot.DeclaredBy}
 			}
+			if len(slot.ValueDefinitions) > 0 {
+				if prev, seen := slotDefinitions[slot.Key]; seen {
+					if !sameValueDefinitions(prev.slot.ValueDefinitions, slot.ValueDefinitions) {
+						return 409, fmt.Sprintf(
+							"model: %s and %s give slot %q different value definitions", prev.model, name, slot.Key,
+						)
+					}
+				} else {
+					slotDefinitions[slot.Key] = requirement{slot: slot, model: name}
+					definitionOrder = append(definitionOrder, slot.Key)
+				}
+			}
 			if !slot.Required {
 				continue
+			}
+			if slot.Access == "read_write" {
+				slotAccess[slot.Key] = requirement{slot: slot, model: name}
+			}
+			if slot.ProcessTolerance != nil {
+				if prev, seen := slotTolerance[slot.Key]; seen && *prev.slot.ProcessTolerance != *slot.ProcessTolerance {
+					return 409, fmt.Sprintf(
+						"model: %s and %s give slot %q different process tolerances", prev.model, name, slot.Key,
+					)
+				}
+				slotTolerance[slot.Key] = requirement{slot: slot, model: name}
+			}
+			for _, link := range slot.Relationships {
+				if slotLinks[slot.Key] == nil {
+					slotLinks[slot.Key] = map[string]requirement{}
+				}
+				if prev, seen := slotLinks[slot.Key][link.Type]; seen && slotLinkTarget(prev.slot, link.Type) != link.Target {
+					return 409, fmt.Sprintf(
+						"model: %s and %s give slot %q different %s targets", prev.model, name, slot.Key, link.Type,
+					)
+				}
+				slotLinks[slot.Key][link.Type] = requirement{slot: slot, model: name}
 			}
 			if prev, seen := requiredSignals[slot.Key]; seen {
 				if prev.slot.DataType != slot.DataType || prev.slot.SemanticType != slot.SemanticType {
@@ -531,17 +698,14 @@ func (w *EditExec) resolveModelSlots(
 			signalOrder = append(signalOrder, slot.Key)
 		}
 	}
-	if len(signalOrder) == 0 && len(childOrder) == 0 {
+	if len(signalOrder) == 0 && len(childOrder) == 0 && len(definitionOrder) == 0 && len(constantOrder) == 0 {
 		return 0, ""
 	}
 
-	// Index the element's signals by name in ascending id order, so a
-	// duplicate name always resolves to its lowest-id signal.
-	type ownedSignal struct {
-		id     string
-		entity editSnapshot
-	}
-	owned := make([]ownedSignal, 0)
+	// Index the element's signals and constants by name in ascending id
+	// order, so a duplicate name always resolves to its lowest-id entity.
+	owned := make([]namedEntity, 0)
+	ownedConstants := make([]namedEntity, 0)
 	otherByName := map[string]editSnapshot{}
 	for _, entity := range state.entities {
 		if entity.Kind != "signal" && entity.Kind != "constant" {
@@ -552,9 +716,11 @@ func (w *EditExec) resolveModelSlots(
 			continue
 		}
 		name, _ := rawString(entity.Payload["name"])
+		id, _ := rawString(entity.Payload["id"])
 		if entity.Kind == "signal" {
-			id, _ := rawString(entity.Payload["id"])
-			owned = append(owned, ownedSignal{id: id, entity: entity})
+			owned = append(owned, namedEntity{id: id, entity: entity})
+		} else {
+			ownedConstants = append(ownedConstants, namedEntity{id: id, entity: entity})
 		}
 		if name != "" {
 			if _, exists := otherByName[name]; !exists {
@@ -562,18 +728,17 @@ func (w *EditExec) resolveModelSlots(
 			}
 		}
 	}
-	sort.Slice(owned, func(i, j int) bool { return owned[i].id < owned[j].id })
-	byName := map[string]editSnapshot{}
-	for _, item := range owned {
-		name, _ := rawString(item.entity.Payload["name"])
-		if name == "" {
-			continue
-		}
-		if _, exists := byName[name]; !exists {
-			byName[name] = item.entity
-		}
-	}
+	byName := lowestIDByName(owned)
+	constantsByName := lowestIDByName(ownedConstants)
 
+	// The signal filling each required slot after this plan: its id, topic
+	// and payload (the queued one where the plan changes it).
+	type filled struct {
+		id      string
+		topic   string
+		payload map[string]json.RawMessage
+	}
+	resolved := map[string]*filled{}
 	for _, key := range signalOrder {
 		slot := requiredSignals[key].slot
 		combinedKey := modelSlotPath(path, key)
@@ -603,13 +768,26 @@ func (w *EditExec) resolveModelSlots(
 			if tagID != "" && existingTag != "" && existingTag != tagID {
 				return 409, fmt.Sprintf("model: slot %q has an incompatible semantic type already assigned", combinedKey)
 			}
-			if tagID != "" && existingTag == "" {
-				payload := cloneRawMap(existing.Payload)
-				payload["semantic_type_id"] = rawJSON(tagID)
+			// What the signal does not carry yet, it takes from the slot: the
+			// semantic type and the unit. A unit it already carries is not
+			// judged here: whether it fits the slot (the same unit, or one
+			// convertible within the category's quantity kind) is the
+			// command boundary's, which knows the quantity kinds.
+			existingUnit, _ := rawString(existing.Payload["unit"])
+			payload := existing.Payload
+			if (tagID != "" && existingTag == "") || (slot.Unit != "" && existingUnit == "") {
+				payload = cloneRawMap(existing.Payload)
+				if tagID != "" && existingTag == "" {
+					payload["semantic_type_id"] = rawJSON(tagID)
+				}
+				if slot.Unit != "" && existingUnit == "" {
+					payload["unit"] = rawJSON(slot.Unit)
+				}
 				if err := state.queue(existing.Record.Topic, payload); err != nil {
 					return 422, "model: payload is not encodable"
 				}
 			}
+			resolved[key] = &filled{id: existingID, topic: existing.Record.Topic, payload: payload}
 			continue
 		}
 
@@ -647,6 +825,186 @@ func (w *EditExec) resolveModelSlots(
 			return 422, "model: payload is not encodable"
 		}
 		state.signalPaths[signalPath] = true
+		resolved[key] = &filled{id: signalID, topic: topic, payload: payload}
+	}
+
+	// A required constant slot is filled by the element's constant of that
+	// name. Assign gives it the slot's semantic type when it has none; a
+	// missing one is left to whoever authors its value.
+	for _, key := range constantOrder {
+		slot := requiredConstants[key].slot
+		combinedKey := modelSlotPath(path, key)
+		if occupant, found := byName[key]; found {
+			occupantID, _ := rawString(occupant.Payload["id"])
+			return 409, fmt.Sprintf(
+				"model: constant slot %q is occupied by signal %s, not a constant", combinedKey, occupantID,
+			)
+		}
+		existing, found := constantsByName[key]
+		if !found {
+			continue
+		}
+		existingID, _ := rawString(existing.Payload["id"])
+		if message := requireExpected(state.expected, entityVersionKey("constant", existingID)); message != "" {
+			return 422, "model: " + message
+		}
+		existingType, _ := rawString(existing.Payload["data_type"])
+		if !compatibleDataTypes(existingType, slotDataTypes[slot.DataType]) {
+			return 409, fmt.Sprintf(
+				"model: slot %q has incompatible data_type: constant has %q, model requires %q",
+				combinedKey, existingType, slot.DataType,
+			)
+		}
+		payload := cloneRawMap(existing.Payload)
+		adopted := false
+		if slot.SemanticType != "" {
+			tagID, ok := w.resolveSemanticTag(state, slot.SemanticType)
+			if !ok {
+				return 409, fmt.Sprintf("model: slot %q names unknown semantic type %q", combinedKey, slot.SemanticType)
+			}
+			existingTag, _ := rawString(existing.Payload["semantic_type_id"])
+			switch {
+			case existingTag == "":
+				payload["semantic_type_id"] = rawJSON(tagID)
+				adopted = true
+			case existingTag != tagID:
+				return 409, fmt.Sprintf("model: slot %q has an incompatible semantic type already assigned", combinedKey)
+			}
+		}
+		// A constant without a unit takes the slot's, as a signal does.
+		if existingUnit, _ := rawString(existing.Payload["unit"]); slot.Unit != "" && existingUnit == "" {
+			payload["unit"] = rawJSON(slot.Unit)
+			adopted = true
+		}
+		if adopted {
+			if err := state.queue(existing.Record.Topic, payload); err != nil {
+				return 422, "model: payload is not encodable"
+			}
+		}
+	}
+
+	// Access, tolerance and links the slots declare land on the signals that
+	// fill them. A read_write slot makes its signal read_write; a signal that
+	// is read_write where the slot is read does not implement it. A slot's
+	// process tolerance is given to a signal that has none; a signal with a
+	// different one does not implement it. A link whose target slot no signal
+	// fills here (an optional slot) is left out.
+	for _, key := range signalOrder {
+		fill := resolved[key]
+		combinedKey := modelSlotPath(path, key)
+		payload := cloneRawMap(fill.payload)
+		current, _ := rawString(payload["access"])
+		if current == "" {
+			current = "read"
+		}
+		_, wantsWrite := slotAccess[key]
+		switch {
+		case wantsWrite && current != "read_write":
+			payload["access"] = rawJSON("read_write")
+		case !wantsWrite && current == "read_write":
+			return 409, fmt.Sprintf(
+				"model: slot %q is read, but its signal %s is read_write; a read slot is implemented by a read signal",
+				combinedKey, fill.id,
+			)
+		}
+		if want, declared := slotTolerance[key]; declared {
+			var held *float64
+			if raw, ok := payload["process_tolerance"]; ok && len(raw) > 0 && string(raw) != "null" {
+				var value float64
+				if err := json.Unmarshal(raw, &value); err != nil {
+					return 422, fmt.Sprintf("model: signal %s has an unreadable process_tolerance", fill.id)
+				}
+				held = &value
+			}
+			switch {
+			case held == nil:
+				payload["process_tolerance"] = rawJSON(*want.slot.ProcessTolerance)
+			case *held != *want.slot.ProcessTolerance:
+				return 409, fmt.Sprintf(
+					"model: slot %q has process tolerance %v, but its signal %s has %v",
+					combinedKey, *want.slot.ProcessTolerance, fill.id, *held,
+				)
+			}
+		}
+		if want, declared := slotDefinitions[key]; declared &&
+			!sameValueDefinitions(heldValueDefinitions(payload["value_definitions"]), want.slot.ValueDefinitions) {
+			payload["value_definitions"] = rawJSON(want.slot.ValueDefinitions)
+		}
+		var links []relationshipLink
+		if raw, ok := payload["relationships"]; ok && len(raw) > 0 && string(raw) != "null" {
+			if err := json.Unmarshal(raw, &links); err != nil {
+				return 422, fmt.Sprintf("model: signal %s has unreadable relationships", fill.id)
+			}
+		}
+		kinds := make([]string, 0, len(slotLinks[key]))
+		for kind := range slotLinks[key] {
+			kinds = append(kinds, kind)
+		}
+		sort.Strings(kinds)
+		addedLinks := false
+		for _, kind := range kinds {
+			targetFill := resolved[slotLinkTarget(slotLinks[key][kind].slot, kind)]
+			if targetFill == nil {
+				continue
+			}
+			held := -1
+			for i, link := range links {
+				if link.Type == kind {
+					held = i
+				}
+			}
+			switch {
+			case held < 0:
+				links = append(links, relationshipLink{Type: kind, Target: targetFill.id})
+				addedLinks = true
+			case links[held].Target != targetFill.id:
+				return 409, fmt.Sprintf(
+					"model: slot %q needs %s target %s, but its signal %s already names %s",
+					combinedKey, kind, targetFill.id, fill.id, links[held].Target,
+				)
+			}
+		}
+		if addedLinks {
+			payload["relationships"] = rawJSON(links)
+		}
+		if rawMapsEqual(payload, fill.payload) {
+			continue
+		}
+		if err := state.queue(fill.topic, payload); err != nil {
+			return 422, "model: payload is not encodable"
+		}
+		fill.payload = payload
+	}
+
+	// An optional slot is filled only by a signal that already exists. When
+	// the slot owns value definitions, that signal is given them like a
+	// required slot's; one whose data type cannot hold them is left alone,
+	// and the read side's coverage reports it as a conflict.
+	for _, key := range definitionOrder {
+		if _, required := requiredSignals[key]; required {
+			continue
+		}
+		existing, found := byName[key]
+		if !found {
+			continue
+		}
+		want := slotDefinitions[key].slot
+		existingType, _ := rawString(existing.Payload["data_type"])
+		if existingType == "" || !compatibleDataTypes(existingType, slotDataTypes[want.DataType]) {
+			continue
+		}
+		if sameValueDefinitions(heldValueDefinitions(existing.Payload["value_definitions"]), want.ValueDefinitions) {
+			continue
+		}
+		existingID, _ := rawString(existing.Payload["id"])
+		if message := requireExpected(state.expected, entityVersionKey("signal", existingID)); message != "" {
+			return 422, "model: " + message
+		}
+		payload := cloneRawMap(existing.Payload)
+		payload["value_definitions"] = rawJSON(want.ValueDefinitions)
+		if err := state.queue(existing.Record.Topic, payload); err != nil {
+			return 422, "model: payload is not encodable"
+		}
 	}
 
 	childrenByName := directChildrenByName(state.entities, elementID)
@@ -661,14 +1019,28 @@ func (w *EditExec) resolveModelSlots(
 				combinedKey, occupant.Kind, entityName,
 			)
 		}
+		var childTagID string
+		if cr.semanticType != "" {
+			id, ok := w.resolveSemanticTag(state, cr.semanticType)
+			if !ok {
+				return 409, fmt.Sprintf("model: child slot %q names unknown semantic type %q", combinedKey, cr.semanticType)
+			}
+			childTagID = id
+		}
 
 		if child, found := childrenByName[entityName]; found {
 			childID, _ := rawString(child.Payload["id"])
 			if message := requireExpected(state.expected, entityVersionKey("system-element", childID)); message != "" {
 				return 422, "model: " + message
 			}
+			// A child of another category does not fill the slot; one without
+			// a category takes the slot's, as a signal takes its semantic type.
+			existingTag, _ := rawString(child.Payload["semantic_type_id"])
+			if childTagID != "" && existingTag != "" && existingTag != childTagID {
+				return 409, fmt.Sprintf("model: child slot %q has an incompatible category already assigned", combinedKey)
+			}
 			implements := stringListFromRaw(child.Payload["implements"])
-			changed := false
+			changed := childTagID != "" && existingTag == ""
 			for _, name := range cr.childModels {
 				if !containsString(implements, name) {
 					implements = append(implements, name)
@@ -678,6 +1050,9 @@ func (w *EditExec) resolveModelSlots(
 			if changed {
 				payload := cloneRawMap(child.Payload)
 				payload["implements"] = rawJSON(implements)
+				if childTagID != "" && existingTag == "" {
+					payload["semantic_type_id"] = rawJSON(childTagID)
+				}
 				if err := state.queue(child.Record.Topic, payload); err != nil {
 					return 422, "model: attributes are not encodable"
 				}
@@ -710,6 +1085,9 @@ func (w *EditExec) resolveModelSlots(
 		}
 		if len(cr.childModels) > 0 {
 			payload["implements"] = rawJSON(cr.childModels)
+		}
+		if childTagID != "" {
+			payload["semantic_type_id"] = rawJSON(childTagID)
 		}
 		topic := editTopic("_SystemElement", w.store.NodeID(), childPath)
 		if err := state.queue(topic, payload); err != nil {

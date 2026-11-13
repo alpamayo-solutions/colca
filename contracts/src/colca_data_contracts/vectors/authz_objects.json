@@ -3,6 +3,7 @@
   "scopes": [
     "read",
     "acknowledge",
+    "annotate",
     "param",
     "operate",
     "maintain",
@@ -21,7 +22,7 @@
   "realm_admin_role": "colca_admin",
   "realm_admin_bundle": [
     "admin:#",
-    "cmd:#:acknowledge,admin,configure,maintain,operate,param",
+    "cmd:#:acknowledge,admin,annotate,configure,maintain,operate,param",
     "read:#"
   ]
 }

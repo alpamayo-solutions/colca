@@ -78,7 +78,7 @@ func (e *Engine) IngestClientBatch(identity string, records []BatchRecord) []Bat
 			Topic: in.Topic, Payload: in.Payload, TS: ts,
 			WrittenBy: attribution.WrittenBy, ActorID: attribution.ActorID,
 			ActorLabel: attribution.ActorLabel, ActorKind: attribution.ActorKind,
-			ActorGroups: attribution.ActorGroups, ActorClient: attribution.ActorClient,
+			ActorGroups: attribution.ActorGroups, ActorClient: attribution.ActorClient, ActorEmail: attribution.ActorEmail, ActorClasses: attribution.ActorClasses, ActorCredential: attribution.ActorCredential,
 		}
 		if uns.IsState(class) {
 			rec.KVPath, rec.KVNode = p.Path, p.NodeID
@@ -131,7 +131,7 @@ func (e *Engine) IngestClientBatch(identity string, records []BatchRecord) []Bat
 			}
 			e.observeIndexes(item.parsed.Contract, topic, payload)
 			if e.deliver != nil {
-				e.deliver(topic, payload, retainFor(item.class))
+				e.deliver(topic, payload, retainFor(item.class) && !storeRecords[j].Stale)
 			}
 			e.observe(item.parsed, topic, payload)
 			e.checkMetricBinding(item.parsed)

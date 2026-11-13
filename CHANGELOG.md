@@ -1,5 +1,180 @@
 # Changelog
 
+## [0.45.1](https://github.com/alpamayo-solutions/colca/compare/v0.45.0...v0.45.1) (2026-11-11)
+
+
+### Fixes
+
+* **store:** a _Metric's current value is its newest sample ([#269](https://github.com/alpamayo-solutions/colca/issues/269)) ([a85ed93](https://github.com/alpamayo-solutions/colca/commit/a85ed9370d6f6308ff70891cc3f5640f1b867d08))
+
+## [0.45.0](https://github.com/alpamayo-solutions/colca/compare/v0.44.1...v0.45.0) (2026-11-09)
+
+
+### Features
+
+* _ServiceState, a service's private state on its own stream ([#267](https://github.com/alpamayo-solutions/colca/issues/267)) ([b07fa8b](https://github.com/alpamayo-solutions/colca/commit/b07fa8b546ac9d81414a59b7b9a6e37c72aaf47c))
+
+## [0.44.1](https://github.com/alpamayo-solutions/colca/compare/v0.44.0...v0.44.1) (2026-11-05)
+
+
+### Fixes
+
+* **historian:** reject a value with a NUL character instead of retrying its page forever ([#262](https://github.com/alpamayo-solutions/colca/issues/262)) ([7f7cc40](https://github.com/alpamayo-solutions/colca/commit/7f7cc408f83c41938b539e20043fb553965ad97e))
+
+## [0.44.0](https://github.com/alpamayo-solutions/colca/compare/v0.43.0...v0.44.0) (2026-11-04)
+
+
+### Features
+
+* **auth:** a PAT person's command is authorized again where it comes down ([#260](https://github.com/alpamayo-solutions/colca/issues/260)) ([59ccbfc](https://github.com/alpamayo-solutions/colca/commit/59ccbfcc4514dac4bfe93475c5990b76b019d1a9))
+
+## [0.43.0](https://github.com/alpamayo-solutions/colca/compare/v0.42.1...v0.43.0) (2026-10-30)
+
+
+### Features
+
+* a data-model child slot may name the child's category ([#258](https://github.com/alpamayo-solutions/colca/issues/258)) ([32d2941](https://github.com/alpamayo-solutions/colca/commit/32d29419023cbb5a5d4833d2ddc0ae153b7bbf24))
+
+## [0.42.1](https://github.com/alpamayo-solutions/colca/compare/v0.42.0...v0.42.1) (2026-10-27)
+
+
+### Fixes
+
+* **contracts:** accept franzmq 0.7 ([#255](https://github.com/alpamayo-solutions/colca/issues/255)) ([b98e14e](https://github.com/alpamayo-solutions/colca/commit/b98e14e5191ada9687a8db0cb006613e9473e1d2))
+
+## [0.42.0](https://github.com/alpamayo-solutions/colca/compare/v0.41.2...v0.42.0) (2026-10-27)
+
+
+### Features
+
+* alarm subscriptions, verified actor witness on commands, faster uplink/downlink reads ([#253](https://github.com/alpamayo-solutions/colca/issues/253)) ([766faad](https://github.com/alpamayo-solutions/colca/commit/766faad2b07651d914d05c1dbed477c21a5efb2f))
+
+## [0.41.2](https://github.com/alpamayo-solutions/colca/compare/v0.41.1...v0.41.2) (2026-10-27)
+
+
+### Performance
+
+* faster filtered reads, crash-safe indexes, batched acks and push-driven grantsync ([#251](https://github.com/alpamayo-solutions/colca/issues/251)) ([d08f99e](https://github.com/alpamayo-solutions/colca/commit/d08f99e562973e27c328bcd0ceb4d64ae562ad4d))
+
+## [0.41.1](https://github.com/alpamayo-solutions/colca/compare/v0.41.0...v0.41.1) (2026-10-22)
+
+
+### Fixes
+
+* **auth:** annotate grant class for annotation writes on any author's entry ([#247](https://github.com/alpamayo-solutions/colca/issues/247)) ([5df46ab](https://github.com/alpamayo-solutions/colca/commit/5df46abeda89fafc6bcec8f8c4d2959ca04ddd65))
+
+## [0.41.0](https://github.com/alpamayo-solutions/colca/compare/v0.40.3...v0.41.0) (2026-10-22)
+
+
+### Features
+
+* **contracts:** constant slots in data models, energy models ([#246](https://github.com/alpamayo-solutions/colca/issues/246)) ([dd0544b](https://github.com/alpamayo-solutions/colca/commit/dd0544bd3ab755a0d73021425422da081091a80b))
+
+
+### Fixes
+
+* **deps:** Go 1.26.10 for CVE-2026-111943 ([#244](https://github.com/alpamayo-solutions/colca/issues/244)) ([2909180](https://github.com/alpamayo-solutions/colca/commit/29091804da3715397ecfd7d85be84a65bb456b70))
+
+## [0.40.3](https://github.com/alpamayo-solutions/colca/compare/v0.40.2...v0.40.3) (2026-10-20)
+
+
+### Fixes
+
+* **repl:** drop a downlink page whose parent no longer enrolls the child ([#241](https://github.com/alpamayo-solutions/colca/issues/241)) ([e2f8480](https://github.com/alpamayo-solutions/colca/commit/e2f8480746960219d330683ffb82d8fef9be0ecf))
+
+## [0.40.2](https://github.com/alpamayo-solutions/colca/compare/v0.40.1...v0.40.2) (2026-10-20)
+
+
+### Fixes
+
+* **uns:** give a late semantic tag to signals bound before it ([#239](https://github.com/alpamayo-solutions/colca/issues/239)) ([728d3f8](https://github.com/alpamayo-solutions/colca/commit/728d3f8822d0b91a8ee3d95c610d2346b9b2e44a))
+
+## [0.40.1](https://github.com/alpamayo-solutions/colca/compare/v0.40.0...v0.40.1) (2026-10-20)
+
+
+### Fixes
+
+* **contracts:** word a value definition refusal that names no key ([#237](https://github.com/alpamayo-solutions/colca/issues/237)) ([ccbad66](https://github.com/alpamayo-solutions/colca/commit/ccbad661b8327b040b05411d1a0f31c830ddc376))
+
+## [0.40.0](https://github.com/alpamayo-solutions/colca/compare/v0.39.1...v0.40.0) (2026-10-20)
+
+
+### Features
+
+* value definitions on signals ([#235](https://github.com/alpamayo-solutions/colca/issues/235)) ([41bea77](https://github.com/alpamayo-solutions/colca/commit/41bea771596bd2b1c3b9ef248bd85b1c08737fd2))
+
+## [0.39.1](https://github.com/alpamayo-solutions/colca/compare/v0.39.0...v0.39.1) (2026-10-19)
+
+
+### Fixes
+
+* **authz:** let an aggregating node api hand over an app notification ([3fe2304](https://github.com/alpamayo-solutions/colca/commit/3fe2304a28efeea3f246427ba7ce62a38e538113))
+
+## [0.39.0](https://github.com/alpamayo-solutions/colca/compare/v0.38.0...v0.39.0) (2026-10-17)
+
+
+### Features
+
+* **authz:** let the node's unplaced api hand over an app notification without an operate grant ([0f5cd99](https://github.com/alpamayo-solutions/colca/commit/0f5cd99a69143b93d25382c1b9cf0b25522bda55))
+
+## [0.38.0](https://github.com/alpamayo-solutions/colca/compare/v0.37.1...v0.38.0) (2026-10-16)
+
+
+### Features
+
+* **contracts:** process tolerance on _Signal ([004123c](https://github.com/alpamayo-solutions/colca/commit/004123c7aa1c5b549ebf42a4300794669f1fb73a))
+* **contracts:** process tolerance on data-model signal slots ([3b2909e](https://github.com/alpamayo-solutions/colca/commit/3b2909e89a5f41e243aa78b1e553854be862f21b))
+
+## [0.37.1](https://github.com/alpamayo-solutions/colca/compare/v0.37.0...v0.37.1) (2026-10-15)
+
+
+### Performance
+
+* **store:** let concurrent appends share one synced commit ([#226](https://github.com/alpamayo-solutions/colca/issues/226)) ([1e9d9d3](https://github.com/alpamayo-solutions/colca/commit/1e9d9d367597d25ead90f0c5e07ecba14af5eb0e))
+
+## [0.37.0](https://github.com/alpamayo-solutions/colca/compare/v0.36.4...v0.37.0) (2026-10-14)
+
+
+### Features
+
+* **uns:** signal access and typed signal-to-signal relationships ([#224](https://github.com/alpamayo-solutions/colca/issues/224)) ([309c169](https://github.com/alpamayo-solutions/colca/commit/309c16960d42f4b19e1e66f0b37eb5898639c0c2))
+
+## [0.36.4](https://github.com/alpamayo-solutions/colca/compare/v0.36.3...v0.36.4) (2026-10-13)
+
+
+### Fixes
+
+* **ts:** bound the wait on a doorbell in follow and say why it woke ([#221](https://github.com/alpamayo-solutions/colca/issues/221)) ([ed0db76](https://github.com/alpamayo-solutions/colca/commit/ed0db76a7d2ef0f05f9c13ba13f4ad90b68b22c9))
+
+## [0.36.3](https://github.com/alpamayo-solutions/colca/compare/v0.36.2...v0.36.3) (2026-10-13)
+
+
+### Fixes
+
+* **contracts:** bound every text field of an audit event and hold the node's own audit writer to the limits ([#219](https://github.com/alpamayo-solutions/colca/issues/219)) ([147f8f4](https://github.com/alpamayo-solutions/colca/commit/147f8f4d08178e716b65ebe8265ddbb3c6fbb329))
+* **uns:** refuse a second record for an external reference the node already holds ([#218](https://github.com/alpamayo-solutions/colca/issues/218)) ([e2ce318](https://github.com/alpamayo-solutions/colca/commit/e2ce318f5c67360dd950e45022a50b5fa009e28d))
+
+## [0.36.2](https://github.com/alpamayo-solutions/colca/compare/v0.36.1...v0.36.2) (2026-10-13)
+
+
+### Fixes
+
+* **audit:** write a repeated denial once and then its count, and name an unknown key ([#215](https://github.com/alpamayo-solutions/colca/issues/215)) ([db0178c](https://github.com/alpamayo-solutions/colca/commit/db0178c410df56794dde86f835565b8637fba7dd))
+* **mqtt:** end a retired service's session and bound a connected client that never acknowledges ([#216](https://github.com/alpamayo-solutions/colca/issues/216)) ([a8f7e70](https://github.com/alpamayo-solutions/colca/commit/a8f7e70bd75fd549d0f2d74d8bfad3ec61f33497))
+
+## [0.36.1](https://github.com/alpamayo-solutions/colca/compare/v0.36.0...v0.36.1) (2026-10-13)
+
+
+### Fixes
+
+* **clock:** a hold longer than the exchange leaves no round trip ([#211](https://github.com/alpamayo-solutions/colca/issues/211)) ([4728179](https://github.com/alpamayo-solutions/colca/commit/4728179264c6ce616789e253e01be80f1cee29f5))
+* **clock:** measure the parent skew within the request's round trip ([#209](https://github.com/alpamayo-solutions/colca/issues/209)) ([ca7b678](https://github.com/alpamayo-solutions/colca/commit/ca7b6786fe87d96d707e47d996d60d7f492c2bbb))
+* **clock:** report no host estimate where the NTP service keeps none, and export the stale bound ([#214](https://github.com/alpamayo-solutions/colca/issues/214)) ([b66e68a](https://github.com/alpamayo-solutions/colca/commit/b66e68a654432f3a4bce1a3a6c29df37c5b403e7))
+* **historian:** stop at start when the late write relations are missing ([#207](https://github.com/alpamayo-solutions/colca/issues/207)) ([fed3f08](https://github.com/alpamayo-solutions/colca/commit/fed3f081854b99f48c5bc27e4d66508d4ea71042))
+* **mqtt:** bound what is queued for offline sessions and end abandoned ones ([#213](https://github.com/alpamayo-solutions/colca/issues/213)) ([6d275ab](https://github.com/alpamayo-solutions/colca/commit/6d275abdf1bdf9b7328554eb409a35ce8707af4d))
+* **mqtt:** refuse a subscription that names an unknown contract on every door ([#212](https://github.com/alpamayo-solutions/colca/issues/212)) ([887ccfa](https://github.com/alpamayo-solutions/colca/commit/887ccfa11d4f7b853cdccc0b4a2c0fb26106f9a0))
+* **repl:** store commands that waited at the parent in one write ([#210](https://github.com/alpamayo-solutions/colca/issues/210)) ([c8a1cbd](https://github.com/alpamayo-solutions/colca/commit/c8a1cbdbacbc15b4d8e441bfa16104150617e03e))
+
 ## [0.36.0](https://github.com/alpamayo-solutions/colca/compare/v0.35.0...v0.36.0) (2026-10-12)
 
 

@@ -207,6 +207,75 @@ func TestAnOperatorAnnotatesAndEditsOnlyTheirOwn(t *testing.T) {
 	}
 }
 
+// A person with annotate on line1 (a shift lead) may change and remove any
+// author's annotation there, including its start and its signals, which
+// operate alone does not allow. annotate reaches nothing outside its element
+// and configures nothing.
+func TestAnAnnotatorChangesAnyAuthorsAnnotation(t *testing.T) {
+	_, exec, versions := twoLines(t)
+	lead := CommandContext{Actor: &Entry{
+		ULID: "kc-sub-lead", Kind: KindHuman, Grants: []string{"cmd:el-line1/#:annotate"},
+	}}
+	colleague := AnnotationSource(&Entry{ULID: "kc-sub-anna", Kind: KindHuman})
+	othersID := deriveAnnotationID("at-1", colleague, 1710000000.0, []string{"sig-1"})
+	annotate := func(op, action, id string, start float64, signals []string) []byte {
+		intent := map[string]any{
+			"type": "annotation", "action": action, "annotation_type_id": "at-1",
+			"source": colleague, "time_start": start, "signal_ids": signals,
+		}
+		if id != "" {
+			intent["annotation_id"] = id
+		}
+		return editBody(t, op, map[string]uint64{}, intent)
+	}
+	if code, message, _, _ := exec.ExecuteWithWrites(lead, "_CmdEdit", "apply",
+		annotate("op-c", "create", "", 1710000000.0, []string{"sig-1"})); code != 200 {
+		t.Fatalf("annotator create inside = %d %q", code, message)
+	}
+	if code, message, _, _ := exec.ExecuteWithWrites(lead, "_CmdEdit", "apply",
+		annotate("op-close", "update", othersID, 1710000000.0, []string{"sig-1"})); code != 200 {
+		t.Fatalf("annotator closing a colleague's annotation = %d %q", code, message)
+	}
+	if code, message, _, _ := exec.ExecuteWithWrites(lead, "_CmdEdit", "apply",
+		annotate("op-move", "update", othersID, 1709999000.0, []string{"sig-1"})); code != 200 {
+		t.Fatalf("annotator moving a colleague's start = %d %q", code, message)
+	}
+	if code, message, _, _ := exec.ExecuteWithWrites(lead, "_CmdEdit", "apply",
+		annotate("op-del", "delete", othersID, 1710000000.0, []string{"sig-1"})); code != 200 {
+		t.Fatalf("annotator removing a colleague's annotation = %d %q", code, message)
+	}
+	if code, message, _, _ := exec.ExecuteWithWrites(lead, "_CmdEdit", "apply",
+		annotate("op-out", "update", othersID, 1710000000.0, []string{"sig-1", "sig-2"})); code != 409 || message != "entity_not_found: signal:sig-2" {
+		t.Fatalf("annotator reaching a signal outside their element = %d %q, want the not-found shape", code, message)
+	}
+	if code, message, _, _ := exec.ExecuteWithWrites(lead, "_CmdEdit", "apply", createUnder(t, "op-cfg", "el-line1", versions)); code != 409 {
+		t.Fatalf("annotator configuring = %d %q, want refused", code, message)
+	}
+	if !Authorize(nil, lead.Actor, ActCmd, "colca/v1/_CmdEdit/n-edge1/apply") {
+		t.Fatal("the door refused an annotate-only person the Edit contract")
+	}
+
+	// The same colleague's annotation under operate alone stays out of reach.
+	operator := CommandContext{Actor: &Entry{
+		ULID: "kc-sub-op", Kind: KindHuman, Grants: []string{"cmd:el-line1/#:operate"},
+	}}
+	if code, message, _, _ := exec.ExecuteWithWrites(operator, "_CmdEdit", "apply",
+		annotate("op-op-close", "update", othersID, 1710000000.0, []string{"sig-1"})); code != 409 {
+		t.Fatalf("operator closing a colleague's annotation = %d %q, want refused", code, message)
+	}
+	// Read alone writes no annotation at all.
+	reader := CommandContext{Actor: &Entry{
+		ULID: "kc-sub-read", Kind: KindHuman, Grants: []string{"read:el-line1/#"},
+	}}
+	if Authorize(nil, reader.Actor, ActCmd, "colca/v1/_CmdEdit/n-edge1/apply") {
+		t.Fatal("the door admitted a read-only person to the Edit contract")
+	}
+	if code, message, _, _ := exec.ExecuteWithWrites(reader, "_CmdEdit", "apply",
+		annotate("op-read", "create", "", 1710000001.0, []string{"sig-1"})); code != 409 {
+		t.Fatalf("reader creating an annotation = %d %q, want refused", code, message)
+	}
+}
+
 // An operator (param on line1, no configure) may set the value and metadata of
 // an existing constant there — an operator-input like a station's sandoff —
 // but not create one, not touch its other attributes, not reach a constant on

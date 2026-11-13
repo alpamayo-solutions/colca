@@ -70,12 +70,25 @@ type Entry struct {
 	// executes one knows the account from a person without reading a name.
 	// Never persisted.
 	ServiceClient string `json:"-"`
+	// Email is the person's address as their token vouches for it: set by
+	// the verifying door only when the token says `email_verified: true`, ""
+	// otherwise and for every other kind of entry. It authorizes nothing; it
+	// travels with a person's command (ActorEmail) for the service that
+	// applies it, such as an alarm subscription that mails them.
+	Email string `json:"-"`
 	// SignedInHere marks a KindHuman entry whose token was verified, or whose
 	// groups were attested, at this node. Only such a person's node-relative
 	// grants ($node) resolve here: a person rebuilt from a command that came
 	// down from the parent signed in at another node, and $node names that
 	// node, not this one. Never persisted.
 	SignedInHere bool `json:"-"`
+	// Credential names the personal access token a KindHuman entry signed in
+	// with, "<token id>:<hash-only digest>", set by the door that verified it;
+	// "" for an OIDC token. A PAT's grants are on the token, not in groups, so
+	// it travels with the person's commands (ActorCredential) for the node that
+	// authorizes them again against its own definition of the token
+	// (PersonalAccessTokenIndex.Attested). Never persisted.
+	Credential string `json:"-"`
 	// Status is StatusActive (or empty) or StatusDraining. Only a node entry
 	// can drain; an external service's delivery lives in broker session state,
 	// so there is nothing to drain.
@@ -390,9 +403,12 @@ type Grant struct {
 // model, so an editor can bind signals without being able to send maintenance
 // commands to a PLC. acknowledge is not on it either: quitting an alarm moves
 // nothing, so everyone who watches a line may be granted it without being able
-// to start or stop the line.
+// to start or stop the line. annotate is not on it either: it writes
+// annotations -- events about the plant -- and nothing else, so a shift lead
+// may correct or remove a colleague's entry without configuring the model or
+// moving equipment.
 var cmdClasses = map[string]bool{
-	"acknowledge": true, "param": true, "operate": true, "maintain": true, "configure": true, "admin": true,
+	"acknowledge": true, "annotate": true, "param": true, "operate": true, "maintain": true, "configure": true, "admin": true,
 }
 
 // CmdClasses lists the hazard classes a cmd grant may name, sorted.
@@ -499,7 +515,7 @@ func ParseGrant(s string) (Grant, error) {
 		}
 		for _, c := range classes {
 			if !cmdClasses[c] {
-				return Grant{}, fmt.Errorf("grant %q: unknown cmd class %q (acknowledge|param|operate|maintain|configure|admin)", s, c)
+				return Grant{}, fmt.Errorf("grant %q: unknown cmd class %q (acknowledge|annotate|param|operate|maintain|configure|admin)", s, c)
 			}
 		}
 		return Grant{Verb: "cmd", Element: z, Classes: classes}, nil
@@ -616,6 +632,53 @@ func (e *Entry) MayImplicitlyConfigure(contract string) bool {
 	// identity, a missing header would bypass every grant. The api forwards
 	// the person's token instead.
 	return e != nil && e.Kind == KindLocal && e.Element == "" && contract == "_CmdConfigure"
+}
+
+// AppNotificationSenders are the names of the local service that hands its
+// node's notifications service an app's notification under its own identity:
+// the platform api, which admits the app by the app's own capability role
+// before it publishes. It registers as `api` on a node and as `hub-api` on a
+// node that aggregates others (a name the platform keeps, because renaming a
+// registered identity is a migration on every deployed node). Local doors
+// carry no credential (reachability inside the deployment is the credential),
+// so the name is the same trust every unplaced local service already holds
+// for _CmdConfigure.
+var AppNotificationSenders = []string{"api", "hub-api"}
+
+// IsAppNotificationSender reports whether name is one the platform api
+// registers under (AppNotificationSenders).
+func IsAppNotificationSender(name string) bool {
+	for _, sender := range AppNotificationSenders {
+		if name == sender {
+			return true
+		}
+	}
+	return false
+}
+
+// appNotificationAction is the last segment of an app notification's path,
+// `{notification-id}/notify`, the act the node's notifications service accepts.
+const appNotificationAction = "notify"
+
+// IsAppNotificationPath reports whether a node-local command path hands the
+// notifications service one app notification: exactly `{notification-id}/notify`.
+func IsAppNotificationPath(path string) bool {
+	id, action, ok := strings.Cut(path, "/")
+	return ok && action == appNotificationAction && id != "" && ValidElementID(id) == nil &&
+		!strings.Contains(id, "_")
+}
+
+// MayImplicitlyDeliverAppNotification reports the second command right implied
+// by placement, narrower than the first: the node's own unplaced api (under
+// either name it registers as) may
+// publish a _CmdOperate app notification to its node without an operate
+// grant. Nothing else rides on it -- not another _CmdOperate path (an alarm's
+// acknowledge, a channel's test stay a person's acts, authorized at their
+// place), not another local service, not a placed one, not a person. The
+// caller pins the node: the right covers the publisher's own node only.
+func (e *Entry) MayImplicitlyDeliverAppNotification(contract, path string) bool {
+	return e != nil && e.Kind == KindLocal && e.Element == "" && IsAppNotificationSender(e.Name) &&
+		contract == "_CmdOperate" && IsAppNotificationPath(path)
 }
 
 // AuthorizeCmdAt reports whether a cmd grant of the class covers the path. The
@@ -752,6 +815,80 @@ func CmdClass(contract string) string {
 	}
 }
 
+// readActs are the acts on an alarm that ask for no more than seeing it: a
+// person who may read an alarm may ask to be told when it fires. They are
+// `_CmdOperate` actions, the last segment of `{element-path…}/{alarm-id}/{action}`,
+// applied by the alarm's evaluator like acknowledge and silence.
+var readActs = map[string]bool{"subscribe": true, "unsubscribe": true}
+
+// ReadAuthorizedAct reports whether a command is authorized by READ coverage
+// rather than by a cmd grant, and of which path: an alarm subscription
+// (`_CmdOperate` to `{element-path…}/{alarm-id}/subscribe` or `/unsubscribe`)
+// needs read on the alarm's own place, the path without the action. A
+// platform alarm stands on the node, so its place is `{alarm-id}` alone.
+// Every other command, and an action with no alarm before it, is false.
+func ReadAuthorizedAct(contract, path string) (string, bool) {
+	if contract != "_CmdOperate" {
+		return "", false
+	}
+	place, action, ok := cutLast(path)
+	if !ok || !readActs[action] || place == "" {
+		return "", false
+	}
+	return place, true
+}
+
+// ClassesAt is what a door witnesses about an actor admitting their command:
+// the classes they hold at the command's place, sorted. The place is the one
+// ReadAuthorizedAct names for a read-authorized act, else the command's path.
+// "read" when their read zones cover it, and each cmd class a grant of theirs
+// covers there (AuthorizeCmdAt). The service applying the command may rely on
+// it instead of authorizing again -- an administrator ending someone else's
+// alarm subscription.
+func ClassesAt(sc Scope, e *Entry, contract, path string) []string {
+	if e == nil {
+		return nil
+	}
+	place := path
+	if readPlace, ok := ReadAuthorizedAct(contract, path); ok {
+		place = readPlace
+	}
+	var classes []string
+	for _, z := range readZones(sc, e) {
+		if coverPath(z, place) {
+			classes = append(classes, "read")
+			break
+		}
+	}
+	for class := range cmdClasses {
+		if AuthorizeCmdAt(sc, e, class, place) {
+			classes = append(classes, class)
+		}
+	}
+	sort.Strings(classes)
+	return classes
+}
+
+// SeesActorWitness reports whether a reader of command records is handed what
+// the admitting door witnessed about their sender beyond who they are -- the
+// verified address and the classes held (actor_email, actor_classes): the
+// node's own unplaced services only, which apply commands (an alarm's
+// evaluator). A person or a machine whose read grants cover a command's place
+// reads the command, never a colleague's address. The admin token is not an
+// entry; the door decides for it.
+func (e *Entry) SeesActorWitness() bool {
+	return e != nil && e.Kind == KindLocal && e.Element == ""
+}
+
+// cutLast splits path at its last "/": everything before, and the last segment.
+func cutLast(path string) (string, string, bool) {
+	i := strings.LastIndexByte(path, '/')
+	if i < 0 {
+		return "", "", false
+	}
+	return path[:i], path[i+1:], true
+}
+
 // Action selects which rule Authorize applies.
 type Action int
 
@@ -873,6 +1010,11 @@ func Authorize(sc Scope, e *Entry, a Action, topic string) bool {
 		if err != nil {
 			return false // only uns records exist in the store: fail closed
 		}
+		if p.Contract == ServiceStateContract {
+			// One reader: the service whose state it is. No read zone
+			// reaches it, however wide.
+			return ServiceStateOwnedBy(sc, e, p.Path)
+		}
 		if localServiceRead(e, topic) {
 			return true
 		}
@@ -885,6 +1027,10 @@ func Authorize(sc Scope, e *Entry, a Action, topic string) bool {
 
 	case ActSub:
 		if isReservedFilter(topic) {
+			return false
+		}
+		if contract, named := FilterContract(topic); named && contract == ServiceStateContract {
+			// Never on the bus (OnBus): there is nothing to subscribe to.
 			return false
 		}
 		if localServiceRead(e, topic) {
@@ -909,15 +1055,27 @@ func Authorize(sc Scope, e *Entry, a Action, topic string) bool {
 		if err != nil || ClassOf(p.Contract) != ClassCmd {
 			return false
 		}
+		if place, ok := ReadAuthorizedAct(p.Contract, p.Path); ok {
+			// Asking to be told about an alarm is seeing it, not acting on
+			// it: read coverage of the alarm's place, the same zones a
+			// record read there is checked against.
+			for _, z := range readZones(sc, e) {
+				if coverPath(z, place) {
+					return true
+				}
+			}
+			return false
+		}
 		class := CmdClass(p.Contract)
 		if AuthorizedAtExecutor(p.Contract) {
 			// The topic path routes the command to the owning node and names
 			// no element, so a prefix check would refuse anyone with a
 			// narrower grant. The door only checks that the person holds a
-			// class the editor honours (configure, operate for annotations, or
-			// param for an operator-input constant's value); the executor
-			// authorizes each position with AuthorizeCmdAt.
-			return e.HoldsCmdClass(class) || e.HoldsCmdClass("operate") || e.HoldsCmdClass("param")
+			// class the editor honours (configure; annotate or operate for
+			// annotations; param for an operator-input constant's value); the
+			// executor authorizes each position with AuthorizeCmdAt.
+			return e.HoldsCmdClass(class) || e.HoldsCmdClass("annotate") ||
+				e.HoldsCmdClass("operate") || e.HoldsCmdClass("param")
 		}
 		return AuthorizeCmdAt(sc, e, class, p.Path)
 
@@ -925,6 +1083,10 @@ func Authorize(sc Scope, e *Entry, a Action, topic string) bool {
 		p, err := Parse(topic)
 		if err != nil {
 			return false
+		}
+		if p.Contract == ServiceStateContract {
+			// Its own position, nobody else's, whatever its write zones.
+			return ServiceStateOwnedBy(sc, e, p.Path)
 		}
 		for _, z := range writeZones(sc, e) {
 			if coverPath(z, p.Path) {
@@ -991,6 +1153,23 @@ func fixedPathPrefix(filter string) (fixed string, isUns bool) {
 		path = append(path, s)
 	}
 	return strings.Join(path, "/"), true
+}
+
+// FilterContract returns the contract a subscribe filter under the topic root
+// names at its third level. named is false when the filter is outside the root
+// or has a wildcard at or before that level: such a filter names no contract.
+// The door refuses a filter that names a contract the node does not define,
+// before any grant is read: nothing is ever published there, so a granted
+// subscription would leave its holder waiting without an error.
+func FilterContract(filter string) (contract string, named bool) {
+	seg := strings.Split(filter, "/")
+	if len(seg) < 3 || (seg[0] != Root() && seg[0] != "+") {
+		return "", false
+	}
+	if seg[1] == "#" || seg[2] == "+" || seg[2] == "#" {
+		return "", false
+	}
+	return seg[2], true
 }
 
 // SubscriptionPath returns the fixed hierarchy path named by an MQTT filter.

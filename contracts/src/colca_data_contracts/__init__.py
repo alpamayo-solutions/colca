@@ -68,6 +68,7 @@ from colca_data_contracts.payload import (
     PRECISION,
     ULID,
     ULID_PATTERN,
+    UNIX_MILLIS,
     UNIX_SECONDS,
     ActorKind,
     AlarmNotificationConfigSnapshot,
@@ -77,6 +78,7 @@ from colca_data_contracts.payload import (
     AlarmState,
     AlarmStateChange,
     AlarmStatus,
+    AlarmSubscription,
     AuditAction,
     AuditEvent,
     AuditOutcome,
@@ -107,7 +109,11 @@ from colca_data_contracts.payload import (
     SealedSecretEnvelope,
     ServiceDetails,
     ServiceType,
+    SignalAccess,
     SignalDataType,
+    SignalRelationship,
+    SignalRelationshipType,
+    SubscriptionChannelKind,
     derive_annotation_id,
     field_limits,
 )
@@ -156,7 +162,7 @@ from colca_data_contracts.payload import (
 from colca_data_contracts.payload import (
     SystemElement as SystemElementPayload,
 )
-from colca_data_contracts.service_topics import service_context
+from colca_data_contracts.service_topics import service_context, service_state_topic
 from colca_data_contracts.topics import (
     TOPICS_CARRY_NODE_ID,
     node_id,
@@ -197,6 +203,7 @@ __all__ = [  # noqa: RUF022 - grouped by topic
     "field_limits",
     "PRECISION",
     "UNIX_SECONDS",
+    "UNIX_MILLIS",
     # Extended base types
     "ServiceType",
     "AuditSource",
@@ -230,6 +237,9 @@ __all__ = [  # noqa: RUF022 - grouped by topic
     "AlarmState",
     "AlarmStatus",
     "AlarmSeverity",
+    # A person's on-call subscription to one alarm, retained at the alarm's place
+    "AlarmSubscription",
+    "SubscriptionChannelKind",
     # Annotation instances, on their own stream like alarms
     "AnnotationPayload",
     "derive_annotation_id",
@@ -251,6 +261,9 @@ __all__ = [  # noqa: RUF022 - grouped by topic
     "SignalPayload",
     "ConstantDataType",
     "SignalDataType",
+    "SignalAccess",
+    "SignalRelationship",
+    "SignalRelationshipType",
     "ReplicationPolicy",
     "ConstantPayload",
     "ResourcePayload",
@@ -280,6 +293,7 @@ __all__ = [  # noqa: RUF022 - grouped by topic
     "connect_local_mqtt",
     "publish_local_service_details",
     "service_context",
+    "service_state_topic",
     "resolve_local_identity",
     "service_details_topic",
 ]

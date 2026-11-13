@@ -78,15 +78,35 @@ type Hint struct {
 	Next    map[string]int64 `json:"next,omitempty"`
 }
 
+// WatchRequest selects what a watch reports. Contracts, when set, narrow each
+// stream's hint to appends of those contracts: a consumer of a few contracts on
+// a busy stream is woken only for them. Interval is the least time between two
+// hints (0: the node's default).
+type WatchRequest struct {
+	Streams   []string
+	Contracts []string
+	Interval  time.Duration
+}
+
 // Watch holds GET /watch open and calls notify for every hint, until ctx ends or
 // the connection fails, and returns why. The first hint names every stream, so a
 // consumer that drains its streams on each hint misses nothing across a
 // reconnect. interval is the least time between two hints (0: the node's
 // default). Reconnecting, with a pause, is the caller's: see WatchForever.
 func (c *Client) Watch(ctx context.Context, streams []string, interval time.Duration, notify func(Hint)) error {
+	return c.WatchFor(ctx, WatchRequest{Streams: streams, Interval: interval}, notify)
+}
+
+// WatchFor is Watch for a WatchRequest, which can also narrow the hints to
+// contracts.
+func (c *Client) WatchFor(ctx context.Context, w WatchRequest, notify func(Hint)) error {
+	streams := w.Streams
 	q := url.Values{"stream": streams}
-	if interval > 0 {
-		q.Set("interval_ms", strconv.FormatInt(interval.Milliseconds(), 10))
+	if len(w.Contracts) > 0 {
+		q["contract"] = w.Contracts
+	}
+	if w.Interval > 0 {
+		q.Set("interval_ms", strconv.FormatInt(w.Interval.Milliseconds(), 10))
 	}
 	watchCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -138,13 +158,18 @@ func (c *Client) Watch(ctx context.Context, streams []string, interval time.Dura
 // WatchForever runs Watch until ctx ends, reconnecting after pause when the
 // connection drops; failed, if set, hears why.
 func (c *Client) WatchForever(ctx context.Context, streams []string, interval, pause time.Duration, notify func(Hint), failed func(error)) {
+	c.WatchForeverFor(ctx, WatchRequest{Streams: streams, Interval: interval}, pause, notify, failed)
+}
+
+// WatchForeverFor is WatchForever for a WatchRequest.
+func (c *Client) WatchForeverFor(ctx context.Context, w WatchRequest, pause time.Duration, notify func(Hint), failed func(error)) {
 	if pause <= 0 {
 		pause = time.Second
 	}
 	delay := pause
 	for {
 		started := time.Now()
-		err := c.Watch(ctx, streams, interval, notify)
+		err := c.WatchFor(ctx, w, notify)
 		if ctx.Err() != nil {
 			return
 		}
