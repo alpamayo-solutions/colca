@@ -755,6 +755,13 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 		// reads without decoding the record: the records it rejects, most of
 		// what a narrow filter crosses, cost no decode. filter applies it too,
 		// so it decides alone on records whose head could not be read cheaply.
+		// The read grants decide on every record. The sender of a command reads
+		// the _Ack answering it without one (engine.AckSentBy): only that ack,
+		// never another sender's at the same place.
+		mayReadTopic := func(topic string) bool {
+			return c.admin || uns.Authorize(e.Scope(), c.entry, uns.ActReadRecord, topic)
+		}
+		maybeAck := func(topic string) bool { return !c.admin && strings.Contains(topic, "/_Ack/") }
 		head := func(topic, signalID string) bool {
 			// A record stored with its signal answers the signal filter without a
 			// parse or a payload decode, so the records it skips cost little.
@@ -773,13 +780,18 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 					return false
 				}
 			}
-			return c.admin || uns.Authorize(e.Scope(), c.entry, uns.ActReadRecord, topic)
+			// An _Ack no read grant covers may still be the caller's own: filter
+			// decides from the record's attribution and the node's ledger.
+			return mayReadTopic(topic) || (c.entry != nil && maybeAck(topic))
 		}
 		filter := func(record store.StoredRecord) bool {
 			if !head(record.Topic, record.SignalID) {
 				return false
 			}
 			topic := record.Topic
+			if c.entry != nil && maybeAck(topic) && !mayReadTopic(topic) && !e.AckSentBy(record, c.entry.ULID) {
+				return false
+			}
 			if stream == uns.StreamFor(uns.ClassCmd) && e.CommandRetired(record) {
 				return false
 			}

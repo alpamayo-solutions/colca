@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/alpamayo-solutions/colca/internal/metrics"
+	"github.com/alpamayo-solutions/colca/internal/store"
 	"github.com/alpamayo-solutions/colca/plugins/uns"
 )
 
@@ -34,6 +35,10 @@ type ledgerEntry struct {
 	at       time.Time
 	ackTopic string
 	ack      []byte
+	// answersAt is the _Ack topic of the command this node accepted under the
+	// id ("" while the id names only a refused command). An ack there is the
+	// sender's own to read (AckSentBy).
+	answersAt string
 	// refused are the refusals owed to other senders who reused the id, each
 	// taken by the first delivery of its exact bytes.
 	refused []refusal
@@ -167,6 +172,28 @@ func (l *commandLedger) recipient(id string, payload []byte) string {
 	return held.actor
 }
 
+// expect notes where the answer to an accepted command is published: the _Ack
+// topic beside the command's own. A refused command never sets it.
+func (l *commandLedger) expect(id, ackTopic string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if held, ok := l.entries[id]; ok && held.answersAt == "" {
+		held.answersAt = ackTopic
+	}
+}
+
+// sentBy is who sent the command this node accepted under id and expects to be
+// answered at ackTopic: "" when the ledger holds no such command. Unlike
+// recipient it takes nothing, so a read may ask as often as it likes.
+func (l *commandLedger) sentBy(id, ackTopic string) string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if held, ok := l.entries[id]; ok && held.answersAt != "" && held.answersAt == ackTopic {
+		return held.actor
+	}
+	return ""
+}
+
 // lookup is what the ledger holds for id.
 func (l *commandLedger) lookup(id string) (string, string, []byte) {
 	l.mu.Lock()
@@ -217,6 +244,7 @@ func (e *Engine) admitCommand(p uns.Parsed, payload []byte, actor string) (strin
 		}
 		return "", true, nil
 	}
+	e.ledger.expect(id, ackTopicFor(p))
 	return id, false, nil
 }
 
@@ -262,4 +290,34 @@ func (e *Engine) AckRecipient(topic string, payload []byte) (string, bool) {
 		return "", true
 	}
 	return e.ledger.recipient(id, payload), true
+}
+
+// AckSentBy reports whether reader sent the command the _Ack record rec
+// answers, as this node recorded it: never from a field the record's writer
+// chose. Two facts count:
+//
+//   - an ack this node wrote itself (an outcome it executed, or an answer to a
+//     queued command) carries the command's door-verified attribution, so its
+//     ActorID names the sender;
+//   - an ack anyone else wrote (a service executing the command, a child node
+//     answering it) is the sender's when this node's correlation ledger holds
+//     the command it accepted under the ack's correlation id, expected to be
+//     answered at exactly the ack's topic.
+//
+// The ledger lives in memory for ledgerWindow, so the second fact lasts as long
+// as a sender may wait for its answer, not across a restart. A record that is
+// not an ack, or a reader with no identity, is never the reader's own.
+func (e *Engine) AckSentBy(rec store.StoredRecord, reader string) bool {
+	if reader == "" {
+		return false
+	}
+	p, err := uns.Parse(rec.Topic)
+	if err != nil || !uns.IsAck(e.ClassOf(p.Contract)) {
+		return false
+	}
+	if rec.WrittenBy == e.cfg.ULID && rec.ActorID == reader {
+		return true
+	}
+	id := correlationID(rec.Payload)
+	return id != "" && e.ledger.sentBy(id, rec.Topic) == reader
 }
